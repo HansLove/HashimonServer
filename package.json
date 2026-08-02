@@ -1,0 +1,32 @@
+{
+  "name": "hashimon-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Authoritative Hashimon server — Phase 1: identity, inventory, emission. A referee, not an oracle.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "migrate": "tsx src/db/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/core/core.test.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.10",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  }
+}

@@ -1,0 +1,110 @@
+import { Router } from "express";
+import { z } from "zod";
+import { requireSession } from "../auth";
+import { AppError, asyncHandler } from "../errors";
+import { emit, getForOwner, listByOwner, present } from "../../domain/hashimons";
+import { issueJob, jobResponse, submitShare } from "../../domain/mining";
+import { Hashimons } from "../../data/species";
+
+export const hashimonsRouter = Router();
+
+hashimonsRouter.get(
+  "/hashimons",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const rows = await listByOwner(req.player!.id);
+    res.json({ hashimons: rows.map(present) });
+  })
+);
+
+hashimonsRouter.get(
+  "/hashimons/:id",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const row = await getForOwner(req.params.id!, req.player!.id);
+    if (!row) { throw new AppError(404, "not found", "not_found"); }
+    res.json(present(row));
+  })
+);
+
+const emitSchema = z.object({
+  speciesKey: z.string().min(1).max(60),
+  provenance: z.enum(["wild", "starter"]).optional(),
+  name: z.string().min(1).max(40).optional(),
+});
+
+hashimonsRouter.post(
+  "/hashimons",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const input = emitSchema.parse(req.body ?? {});
+    if (!Hashimons[input.speciesKey]) {
+      throw new AppError(422, `unknown species: ${input.speciesKey}`, "unknown_species");
+    }
+    const row = await emit({
+      ownerId: req.player!.id,
+      speciesKey: input.speciesKey,
+      provenance: input.provenance,
+      name: input.name,
+    });
+    res.status(201).json(present(row));
+  })
+);
+
+hashimonsRouter.get(
+  "/hashimons/:id/job",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const row = await getForOwner(req.params.id!, req.player!.id);
+    if (!row) { throw new AppError(404, "not found", "not_found"); }
+    const job = await issueJob(row);
+    res.json(jobResponse(job, Number(row.extranonce2)));
+  })
+);
+
+const shareSchema = z.object({
+  jobId: z.string().uuid(),
+  extranonce2: z.number().int().min(0),
+  nonce: z.number().int().min(0).max(0xffffffff),
+  hash: z.string().optional(),
+  totalHashesAttempted: z.number().int().min(0).optional(),
+});
+
+hashimonsRouter.post(
+  "/hashimons/:id/shares",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const row = await getForOwner(req.params.id!, req.player!.id);
+    if (!row) { throw new AppError(404, "not found", "not_found"); }
+
+    const body = shareSchema.parse(req.body ?? {});
+    const outcome = await submitShare(row, body);
+
+    if (!outcome.ok) {
+      const err = outcome.error;
+      if (err === "stale_job") { throw new AppError(409, err, err); }
+      if (err === "duplicate_share") { throw new AppError(409, err, err); }
+      if (err === "under_target") {
+        throw new AppError(422, err, err);
+      }
+      if (err === "dna_mismatch") { throw new AppError(400, err, err); }
+      throw new AppError(422, err ?? "rejected", err ?? "rejected");
+    }
+
+    const presented = present(outcome.row);
+    res.json({
+      verified: true,
+      accepted: true,
+      bits: outcome.bits,
+      hash: outcome.hash,
+      bestShareHash: outcome.row.best_share_hash,
+      bestShareBits: outcome.row.best_share_bits,
+      progression: {
+        tier: presented.tier,
+        stars: presented.stars,
+        stage: presented.stage,
+      },
+      hashimon: presented,
+    });
+  })
+);
