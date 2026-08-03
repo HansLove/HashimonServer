@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { query, withTransaction } from "../db/pool";
 import { audit } from "./audit";
 import { Dna, progressionOf, verifyStoredPow, type PowRecord, CORE_VERSION } from "../core";
+import { Hashimons } from "../data/species";
 
 //The stored row. Note what is NOT here: no stats, no colours, no type. Those are
 //derived from dna + pow by the Caos Core (see present()), so they can never be
@@ -75,6 +76,18 @@ export function present(row: HashimonRow) {
 
 export type Provenance = "wild" | "starter";
 
+export function isGenesisSpecies(speciesKey: string): boolean {
+  return speciesKey.startsWith("genesis_");
+}
+
+export async function countStarterEmissions(ownerId: string): Promise<number> {
+  const res = await query<{ count: number }>(
+    `SELECT COUNT(*)::int AS count FROM hashimons WHERE owner_id = $1 AND provenance = 'starter'`,
+    [ownerId]
+  );
+  return res.rows[0]?.count ?? 0;
+}
+
 //Emit (officially give birth to) a new creature. THE SERVER OWNS THE BIRTH: it
 //generates the birth nonce, so the client cannot grind for a rare identity, and
 //derives the DNA itself. dna is UNIQUE in the table; on the (astronomically
@@ -92,7 +105,11 @@ export async function emit(input: {
   provenance?: Provenance;
   name?: string;
 }): Promise<HashimonRow> {
-  const templateId = input.templateId ?? input.speciesKey;
+  const species = Hashimons[input.speciesKey];
+  if (!species) {
+    throw new Error(`unknown species: ${input.speciesKey}`);
+  }
+  const templateId = input.templateId ?? species.templateId;
   const provenance = input.provenance ?? "wild";
 
   for (let attempt = 0; attempt < 5; attempt++) {

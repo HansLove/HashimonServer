@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireSession } from "../auth";
 import { AppError, asyncHandler } from "../errors";
-import { emit, getForOwner, listByOwner, present } from "../../domain/hashimons";
+import { emit, getForOwner, listByOwner, present, isGenesisSpecies, countStarterEmissions } from "../../domain/hashimons";
 import { issueJob, jobResponse, submitShare } from "../../domain/mining";
 import { Hashimons } from "../../data/species";
 
@@ -41,10 +41,20 @@ hashimonsRouter.post(
     if (!Hashimons[input.speciesKey]) {
       throw new AppError(422, `unknown species: ${input.speciesKey}`, "unknown_species");
     }
+    const provenance = input.provenance ?? "wild";
+    if (isGenesisSpecies(input.speciesKey)) {
+      if (provenance !== "starter") {
+        throw new AppError(422, "genesis species require starter provenance", "genesis_provenance");
+      }
+      const starters = await countStarterEmissions(req.player!.id);
+      if (starters >= 1) {
+        throw new AppError(409, "starter already issued", "starter_limit");
+      }
+    }
     const row = await emit({
       ownerId: req.player!.id,
       speciesKey: input.speciesKey,
-      provenance: input.provenance,
+      provenance,
       name: input.name,
     });
     res.status(201).json(present(row));

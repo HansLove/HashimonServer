@@ -33,6 +33,31 @@ export const Hashimons: Record<string, Species> = {
     type: "pixel", archetype: "canine", baseHp: 50,
     baseStats: { power: 8, defense: 7, speed: 7, energy: 10 }, templateId: "template_genesis_001",
   },
+  genesis_fuego: {
+    name: "Ember Genesis", description: "A pure flame block, loyal from the first spark.", species: "genesis_fuego",
+    type: "fuego", archetype: "canine", baseHp: 50,
+    baseStats: { power: 8, defense: 7, speed: 7, energy: 10 }, templateId: "template_genesis_fuego",
+  },
+  genesis_agua: {
+    name: "Tide Genesis", description: "A contained tide in block form — patient and deep.", species: "genesis_agua",
+    type: "agua", archetype: "amphibian", baseHp: 50,
+    baseStats: { power: 7, defense: 8, speed: 7, energy: 10 }, templateId: "template_genesis_agua",
+  },
+  genesis_aire: {
+    name: "Gust Genesis", description: "Light as a mempool breeze, never quite touching down.", species: "genesis_aire",
+    type: "aire", archetype: "bird", baseHp: 50,
+    baseStats: { power: 7, defense: 7, speed: 8, energy: 10 }, templateId: "template_genesis_aire",
+  },
+  genesis_tierra: {
+    name: "Root Genesis", description: "Layers of defense stacked like confirmed blocks.", species: "genesis_tierra",
+    type: "tierra", archetype: "chelonian", baseHp: 50,
+    baseStats: { power: 7, defense: 8, speed: 6, energy: 10 }, templateId: "template_genesis_tierra",
+  },
+  genesis_electrico: {
+    name: "Volt Genesis", description: "Small, charged, and twitching with chain energy.", species: "genesis_electrico",
+    type: "electrico", archetype: "rodent", baseHp: 50,
+    baseStats: { power: 8, defense: 7, speed: 8, energy: 10 }, templateId: "template_genesis_electrico",
+  },
   solarCub: {
     name: "Solar Cub", description: "A wild ember of the solar branch.", species: "lion",
     type: "fuego", archetype: "lion", baseHp: 35,
