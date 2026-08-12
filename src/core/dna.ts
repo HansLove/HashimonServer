@@ -2,7 +2,7 @@
 //a creature's identity recomputes identically on either side. A Hashimon's DNA is
 //bound to its proof of work: the same template + birth nonce + species always
 //yields the same 64-hex genome, on any machine, forever.
-import { sha256 } from "./sha256";
+import { sha256 } from "@/core/sha256";
 
 export const Dna = {
   derive(templateId: string | number, birthNonce: string | number, speciesKey = ""): string {

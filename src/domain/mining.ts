@@ -1,6 +1,6 @@
-import { query, withTransaction, type DbClient } from "../db/pool";
-import { audit } from "./audit";
-import { config } from "../config";
+import { query, withTransaction, type DbClient } from "@/db/pool";
+import { audit } from "@/domain/audit";
+import { config } from "@/config";
 import {
   calibratedShareTargetBits,
   deriveExtranonce1,
@@ -8,8 +8,8 @@ import {
   type MiningJobRecord,
   type ShareSubmitInput,
   type JobHeader,
-} from "../core/pow";
-import type { HashimonRow } from "./hashimons";
+} from "@/core/pow";
+import type { HashimonRow } from "@/domain/hashimons";
 
 export interface MiningJobRow {
   id: string;

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { query } from "../db/pool";
-import { config } from "../config";
+import { query } from "@/db/pool";
+import { config } from "@/config";
 
 export interface Player {
   id: string;

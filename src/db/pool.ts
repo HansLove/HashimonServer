@@ -1,5 +1,5 @@
 import pg from "pg";
-import { config } from "../config";
+import { config } from "@/config";
 
 //pg numeric types: bigint (int8) comes back as a string by default to avoid
 //precision loss. Our bigints (totalHashes, extranonce2) fit in a JS number for

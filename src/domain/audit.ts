@@ -1,4 +1,4 @@
-import { query, type Sql } from "../db/pool";
+import { query, type Sql } from "@/db/pool";
 
 //Append one row to the audit log. Pass the transaction client so the audit entry
 //commits atomically with the mutation it records.

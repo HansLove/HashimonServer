@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
-import { playerForToken, type Player } from "../domain/players";
-import { AppError, asyncHandler } from "./errors";
+import { playerForToken, type Player } from "@/domain/players";
+import { AppError, asyncHandler } from "@/http/errors";
 
 //Augment Express's Request so downstream handlers see req.player typed.
 declare global {

@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { query, withTransaction } from "../db/pool";
-import { audit } from "./audit";
-import { Dna, progressionOf, verifyStoredPow, type PowRecord, CORE_VERSION } from "../core";
-import { Hashimons } from "../data/species";
+import { query, withTransaction } from "@/db/pool";
+import { audit } from "@/domain/audit";
+import { Dna, progressionOf, verifyStoredPow, type PowRecord, CORE_VERSION } from "@/core/index";
+import { Hashimons } from "@/data/species";
 
 //The stored row. Note what is NOT here: no stats, no colours, no type. Those are
 //derived from dna + pow by the Caos Core (see present()), so they can never be

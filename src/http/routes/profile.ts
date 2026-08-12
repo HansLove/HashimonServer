@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { requireSession } from "../auth";
-import { countForOwner } from "../../domain/hashimons";
-import { asyncHandler } from "../errors";
+import { requireSession } from "@/http/auth";
+import { countForOwner } from "@/domain/hashimons";
+import { asyncHandler } from "@/http/errors";
 
 export const profileRouter = Router();
 

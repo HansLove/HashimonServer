@@ -1,7 +1,7 @@
 //Proof-of-work rules — browser grinds, server verifies (referee, not oracle).
 //Modes: bound (MVP), legacy (original client), bitcoin (future Spoon jobs).
 import { createHash } from "node:crypto";
-import { doubleSha256 } from "./sha256";
+import { doubleSha256 } from "@/core/sha256";
 
 export const BITS_PER_STAR = 4;
 export const MAX_STAGE = 33;

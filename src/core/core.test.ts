@@ -1,8 +1,8 @@
 //Core verification — byte-identical with the browser client.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sha256, doubleSha256 } from "./sha256";
-import { Dna } from "./dna";
+import { sha256, doubleSha256 } from "@/core/sha256";
+import { Dna } from "@/core/dna";
 import {
   leadingZeroBits,
   hashShare,
@@ -16,7 +16,7 @@ import {
   emptyPow,
   type PowRecord,
   type MiningJobRecord,
-} from "./pow";
+} from "@/core/pow";
 
 const TEST_DNA = "deadbeef".repeat(8);
 

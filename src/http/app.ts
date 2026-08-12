@@ -1,11 +1,11 @@
 import express from "express";
 import cors from "cors";
-import { config } from "../config";
-import { healthRouter } from "./routes/health";
-import { sessionRouter } from "./routes/session";
-import { profileRouter } from "./routes/profile";
-import { hashimonsRouter } from "./routes/hashimons";
-import { errorMiddleware } from "./errors";
+import { config } from "@/config";
+import { healthRouter } from "@/http/routes/health";
+import { sessionRouter } from "@/http/routes/session";
+import { profileRouter } from "@/http/routes/profile";
+import { hashimonsRouter } from "@/http/routes/hashimons";
+import { errorMiddleware } from "@/http/errors";
 
 export function createApp() {
   const app = express();

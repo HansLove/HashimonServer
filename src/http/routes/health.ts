@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { query } from "../../db/pool";
-import { CORE_VERSION } from "../../core";
-import { asyncHandler } from "../errors";
+import { query } from "@/db/pool";
+import { CORE_VERSION } from "@/core/index";
+import { asyncHandler } from "@/http/errors";
 
 export const healthRouter = Router();
 

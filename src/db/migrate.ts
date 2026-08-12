@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { pool } from "./pool";
+import { pool } from "@/db/pool";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const sql = readFileSync(join(here, "schema.sql"), "utf8");

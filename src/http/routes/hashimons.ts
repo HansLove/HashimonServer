@@ -1,10 +1,10 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireSession } from "../auth";
-import { AppError, asyncHandler } from "../errors";
-import { emit, getForOwner, listByOwner, present, isGenesisSpecies, countStarterEmissions } from "../../domain/hashimons";
-import { issueJob, jobResponse, submitShare } from "../../domain/mining";
-import { Hashimons } from "../../data/species";
+import { requireSession } from "@/http/auth";
+import { AppError, asyncHandler } from "@/http/errors";
+import { emit, getForOwner, listByOwner, present, isGenesisSpecies, countStarterEmissions } from "@/domain/hashimons";
+import { issueJob, jobResponse, submitShare } from "@/domain/mining";
+import { Hashimons } from "@/data/species";
 
 export const hashimonsRouter = Router();
 

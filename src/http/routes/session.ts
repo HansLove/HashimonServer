@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
-import { createSession, findOrCreatePlayer } from "../../domain/players";
-import { asyncHandler } from "../errors";
+import { createSession, findOrCreatePlayer } from "@/domain/players";
+import { asyncHandler } from "@/http/errors";
 
 export const sessionRouter = Router();
 

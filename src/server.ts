@@ -1,6 +1,6 @@
-import { createApp } from "./http/app";
-import { config } from "./config";
-import { pool } from "./db/pool";
+import { createApp } from "@/http/app";
+import { config } from "@/config";
+import { pool } from "@/db/pool";
 
 const app = createApp();
 
