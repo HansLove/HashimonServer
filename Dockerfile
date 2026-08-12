@@ -24,9 +24,9 @@ RUN pnpm build
 FROM base AS runner
 ENV NODE_ENV=production
 WORKDIR /app
+USER node
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-USER node
 EXPOSE 4000
 CMD ["node", "dist/server.js"]
