@@ -11,8 +11,9 @@
   "scripts": {
     "preinstall": "npx only-allow pnpm",
     "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
-    "migrate": "tsx src/db/migrate.ts",
+    "build": "tsc && cp src/db/schema.sql dist/db/schema.sql",
+    "start": "node dist/server.js",
+    "migrate": "node dist/db/migrate.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/core/core.test.ts"
   },
