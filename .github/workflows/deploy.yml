@@ -1,0 +1,81 @@
+---
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full commit SHA to deploy (defaults to current HEAD). Use a previous SHA to rollback."
+        required: false
+        type: string
+
+env:
+  IMAGE_REPO: registry.digitalocean.com/hashimon/server
+
+concurrency: deploy
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.tag.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to DigitalOcean Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.digitalocean.com
+          username: ${{ secrets.DOCR_TOKEN }}
+          password: ${{ secrets.DOCR_TOKEN }}
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          SHA="${{ inputs.sha || github.sha }}"
+          echo "image=${IMAGE_REPO}:sha-${SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tag.outputs.image }}
+          build-args: |
+            BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
+          cache-from: type=registry,ref=${{ env.IMAGE_REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE_REPO }}:buildcache,mode=max
+          # DOCR does not support provenance attestations
+          provenance: false
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          DOCR_TOKEN: ${{ secrets.DOCR_TOKEN }}
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Unquoted EOF: $DOCR_TOKEN and $IMAGE expand on the runner and travel
+          # over stdin, never through the remote argv (not visible in ps).
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "$SSH_USER@$SSH_HOST" 'bash -s' <<EOF
+          set -euo pipefail
+          echo "$DOCR_TOKEN" | sudo -u luanti docker login registry.digitalocean.com --username "$DOCR_TOKEN" --password-stdin
+          echo "HASHIMON_IMAGE=$IMAGE" | sudo tee /etc/hashimon/image.env > /dev/null
+          sudo systemctl restart hashimon-server
+          EOF
