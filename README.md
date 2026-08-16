@@ -75,56 +75,83 @@ Scripts: `dev` (watch), `start`, `migrate`, `typecheck` (`tsc --noEmit`),
 > *core* tests run dependency-free). `yarn install` works and was used to verify
 > everything below. Once installed, `npm run <script>` is fine.
 
-## API (Phase 1)
+## Ownership rule
+
+**Poseer = tener llave (`public_key`).** Web `/register` creates an owner (username +
+password + secp256k1 + genesis starter). Luanti guests who only click *Registrarse*
+in-game have no API key and **cannot** emit or bind a Hashimon roster. They can still
+explore the world.
+
+Anonymous `POST /session` remains for 2D/dev; those players also cannot `POST /hashimons`
+until they have a `public_key`.
+
+## API
 
 All bodies are JSON. Authenticated routes need `Authorization: Bearer <token>`.
+Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 
-| Method | Path              | Auth | Purpose |
-|--------|-------------------|------|---------|
-| GET    | `/health`         | –    | liveness + DB round-trip |
-| POST   | `/session`        | –    | create-or-restore identity → `{ token, player }` |
-| GET    | `/profile`        | ✓    | account state (credits, counts) |
-| GET    | `/hashimons`      | ✓    | inventory, each with derived rank + self-verifying proof |
-| GET    | `/hashimons/:id`  | ✓    | one owned creature (404 if not yours) |
-| POST   | `/hashimons`      | ✓    | **emission gate** — server births a creature of `{ speciesKey }` |
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/health` | – | liveness + DB round-trip |
+| POST | `/register` | – | **owner signup** → token + genesis Hashimon + publicKey |
+| POST | `/login` | – | username/password → token (+ encrypted privkey blob if custody B) |
+| POST | `/session` | – | anonymous / publicKey restore (2D/dev; no ownership) |
+| GET | `/profile` | ✓ | account state (`canOwn`, custody, counts) |
+| GET | `/hashimons` | ✓ | inventory |
+| GET | `/hashimons/:id` | ✓ | one owned creature |
+| POST | `/hashimons` | ✓ | emission — **403 `cannot_own` without public_key** |
+| POST | `/wallet/claim-self-custody` | ✓ | drop server-held enc private key |
+| GET | `/internal/luanti-auth` | secret | owner list `{name, password}` for Luanti poll |
+| POST | `/internal/luanti-bind` | secret | `{name}` → bearer session (owners only) |
 
-`POST /session` body: `{ publicKey?, displayName? }` (all optional; no key ⇒ a
-fresh anonymous identity). `POST /hashimons` body: `{ speciesKey, provenance?, name? }`.
+### `POST /register` (Lovable contract)
 
-Each creature comes back with derived `tier / stars / stage / progress`, its `pow`
-biography, and `verified`: `true` (recomputed and matches), `false` (tampered), or
-`null` (born but never mined).
+```json
+{
+  "username": "Hans",
+  "password": "at-least-8-chars",
+  "speciesKey": "genesis_fuego",
+  "publicKey": "02…",
+  "custody": "player"
+}
+```
 
-### Quick manual check
+- `username`: same rules as Luanti (`[A-Za-z0-9_-]`, 1–20).
+- `speciesKey`: one of `genesis_fuego` | `genesis_agua` | `genesis_aire` | `genesis_tierra` | `genesis_electrico`.
+- Omit `publicKey` / `custody` → API generates secp256k1, stores **AES-GCM encrypted** private key (`custody: server_encrypted`).
+- Send browser-derived `publicKey` + `custody: "player"` for self-custody (mnemonic step is optional in the UI).
+
+Response includes `{ token, player, publicKey, custody, hashimon }`. Never returns the private key in cleartext.
+
+Use the **same username and password** on the Luanti join screen (IP/port of Hashiworld).
+
+### Luanti bridge
+
+Set `LUANTI_SERVER_SECRET` in API `.env` and the same value as `hashimon_server_secret` in `minetest.conf`. The world polls `/internal/luanti-auth` every ~2s and, on join for cached owners, calls `/internal/luanti-bind` (no password forwarded — the engine already verified the API-published hash).
+
+If a guest name is later registered on the web, **the API password wins** on the next poll.
+
+### Quick manual check (owner)
 
 ```bash
-TOKEN=$(curl -s -X POST localhost:4000/session -H 'content-type: application/json' -d '{}' | jq -r .token)
-curl -s -X POST localhost:4000/hashimons -H "authorization: Bearer $TOKEN" \
-     -H 'content-type: application/json' -d '{"speciesKey":"solarCub"}' | jq
-curl -s localhost:4000/hashimons -H "authorization: Bearer $TOKEN" | jq
+curl -s -X POST localhost:4000/register -H 'content-type: application/json' \
+  -d '{"username":"Hans","password":"password123","speciesKey":"genesis_fuego"}' | jq
+curl -s localhost:4000/internal/luanti-auth -H "X-Luanti-Secret: $LUANTI_SERVER_SECRET" | jq
 ```
 
 ## Verified so far
 
 - `tsc --noEmit` — clean.
-- Core parity tests (`npm test`) — SHA-256 vectors, double-hash, DNA determinism +
-  exact `template:nonce:species` format, `leadingZeroBits`, rank/stage mapping, and
-  `verifyShare` accepting a real share while rejecting a forged one, an over-claim,
-  and reporting an unmined creature. Includes a byte-for-byte match against the
-  client's DNA convention.
-- Boot smoke test (no DB): clean 404 on unknown routes, JSON 500 on a DB-less
-  `/health` (no stack leak), 401 on a protected route without a token.
-- **Pending local Postgres:** the DB-backed end-to-end (session → emit → inventory).
-  Bring up Postgres and run the Quick manual check above.
+- Core + auth helper tests (`pnpm test`) — SHA-256 / DNA / PoW parity plus username, Luanti hash, key encrypt round-trip, `canOwn`.
+- Owner smoke: `/register` → `/internal/luanti-auth` → `/internal/luanti-bind`; anonymous `POST /hashimons` → 403 `cannot_own`.
 
 ## Next phases (not built yet)
 
-2. **PoW submission** — `POST /hashimons/:id/shares` verifies a submitted best
-   share with `verifyShare` (already in core) before it lets a creature evolve.
 3. **Incubation / Caos Engine** — server-owned seed so births can't be grinded.
 4. **Credits / payments** — via a provider (Stripe-class), never hand-rolled.
 5. **MCP layer** — the player's own AI reads and *suggests*; it never writes
    authoritative state.
 
-Do not grow the Phase-1 bearer sessions into a home-made auth system, and do not
-build payments by hand — both carry real security/regulatory weight (see ADR §8).
+Do not build payments by hand — that carries real security/regulatory weight (see ADR §8).
+Owner passwords and encrypted keys are intentional for the web↔Luanti bridge; harden
+(SRP `#1#`, challenge signing) before treating this as production-grade wallet custody.

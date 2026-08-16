@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireSession } from "@/http/auth";
 import { AppError, asyncHandler } from "@/http/errors";
+import { canOwn } from "@/domain/players";
 import { emit, getForOwner, listByOwner, present, isGenesisSpecies, countStarterEmissions } from "@/domain/hashimons";
 import { issueJob, jobResponse, submitShare } from "@/domain/mining";
 import { Hashimons } from "@/data/species";
@@ -37,6 +38,9 @@ hashimonsRouter.post(
   "/hashimons",
   requireSession,
   asyncHandler(async (req, res) => {
+    if (!canOwn(req.player!)) {
+      throw new AppError(403, "cannot own without a public key — register on the web", "cannot_own");
+    }
     const input = emitSchema.parse(req.body ?? {});
     if (!Hashimons[input.speciesKey]) {
       throw new AppError(422, `unknown species: ${input.speciesKey}`, "unknown_species");

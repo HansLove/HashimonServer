@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireSession } from "@/http/auth";
 import { countForOwner } from "@/domain/hashimons";
+import { canOwn } from "@/domain/players";
 import { asyncHandler } from "@/http/errors";
 
 export const profileRouter = Router();
@@ -16,8 +17,11 @@ profileRouter.get(
     res.json({
       id: player.id,
       displayName: player.display_name,
+      username: player.username,
       publicKey: player.public_key,
       credits: player.credits,
+      custody: player.custody,
+      canOwn: canOwn(player),
       hashimonCount,
       memberSince: player.created_at,
     });

@@ -6,6 +6,8 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- A player is an identity that owns creatures and (later) credits. public_key is
 -- optional so a device can play anonymously and bind an identity later.
+-- Web owners (Lovable /register) get username + password + public_key; Luanti
+-- guests have no API row — ownership requires a key (canOwn).
 CREATE TABLE IF NOT EXISTS players (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   public_key   text UNIQUE,
@@ -13,6 +15,18 @@ CREATE TABLE IF NOT EXISTS players (
   credits      bigint NOT NULL DEFAULT 0,
   created_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- Owner accounts (web register). Anonymous POST /session rows leave these null.
+ALTER TABLE players ADD COLUMN IF NOT EXISTS username text;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS password_hash text;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS luanti_password text;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS enc_private_key bytea;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS kdf_salt text;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS kdf_params jsonb;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS custody text; -- server_encrypted | player | null
+
+CREATE UNIQUE INDEX IF NOT EXISTS players_username_lower_idx
+  ON players (lower(username)) WHERE username IS NOT NULL;
 
 -- Bearer session tokens. Thin on purpose; swap for a real auth provider before
 -- production (see README — do not grow this into a home-made auth system).

@@ -24,8 +24,11 @@ sessionRouter.post(
       player: {
         id: player.id,
         displayName: player.display_name,
+        username: player.username,
         publicKey: player.public_key,
         credits: player.credits,
+        custody: player.custody,
+        canOwn: Boolean(player.public_key),
       },
     });
   })
