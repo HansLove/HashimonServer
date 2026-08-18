@@ -9,7 +9,11 @@ import {
   type ShareSubmitInput,
   type JobHeader,
 } from "@/core/pow";
+import { getPreparedTemplate } from "@/domain/block-template";
 import type { HashimonRow } from "@/domain/hashimons";
+
+type BitcoinPayload = NonNullable<MiningJobRecord["bitcoin"]>;
+type StoredHeader = JobHeader & { templateId?: string; bitcoin?: BitcoinPayload };
 
 export interface MiningJobRow {
   id: string;
@@ -25,16 +29,18 @@ export interface MiningJobRow {
 }
 
 function rowToJob(row: MiningJobRow): MiningJobRecord {
+  const header = row.header as StoredHeader;
   return {
     id: row.id,
     hashimonId: row.hashimon_id,
-    templateId: (row.header as JobHeader & { templateId?: string }).templateId ?? "",
+    templateId: header.templateId ?? "",
     extranonce1: row.extranonce1,
     shareTargetBits: row.share_target_bits,
     blockTargetBits: row.block_target_bits,
     expiresAt: new Date(row.expires_at),
     mode: row.mode,
     header: row.header,
+    bitcoin: row.mode === "bitcoin" ? header.bitcoin : undefined,
   };
 }
 
@@ -42,19 +48,33 @@ export async function issueJob(row: HashimonRow): Promise<MiningJobRow> {
   const shareTargetBits = calibratedShareTargetBits();
   const extranonce1 = deriveExtranonce1(row.dna);
   const now = Date.now();
-  const header: JobHeader = {
-    version: 0x20000000,
-    prevHash: "0000000000000000000000000000000000000000000000000000000000000000",
-    merkleRoot: row.dna,
-    timestamp: Math.floor(now / 1000),
-    bits: "1d00ffff",
-  };
+
+  const prepared = config.miningMode === "bitcoin" ? await getPreparedTemplate(now) : null;
+  const mode: MiningJobRow["mode"] = prepared ? "bitcoin" : "bound";
+
+  const header: StoredHeader = prepared
+    ? {
+        version: parseInt(prepared.versionHex, 16),
+        prevHash: prepared.prevhashBE,
+        merkleRoot: row.dna,
+        timestamp: prepared.curtime,
+        bits: prepared.bits,
+        templateId: prepared.templateId,
+        bitcoin: { ...prepared, extranonce1 },
+      }
+    : {
+        version: 0x20000000,
+        prevHash: "0000000000000000000000000000000000000000000000000000000000000000",
+        merkleRoot: row.dna,
+        timestamp: Math.floor(now / 1000),
+        bits: "1d00ffff",
+      };
 
   await query(`DELETE FROM mining_jobs WHERE hashimon_id = $1 AND expires_at < now()`, [row.id]);
 
   const res = await query<MiningJobRow>(
     `INSERT INTO mining_jobs (hashimon_id, owner_id, extranonce1, share_target_bits, block_target_bits, mode, header, expires_at)
-     VALUES ($1, $2, $3, $4, $5, 'bound', $6, $7)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
     [
       row.id,
@@ -62,6 +82,7 @@ export async function issueJob(row: HashimonRow): Promise<MiningJobRow> {
       extranonce1,
       shareTargetBits,
       config.blockTargetBits,
+      mode,
       JSON.stringify(header),
       new Date(now + config.jobTtlMs).toISOString(),
     ]
@@ -78,7 +99,7 @@ export async function getJobForOwner(jobId: string, ownerId: string): Promise<Mi
 }
 
 export function jobResponse(job: MiningJobRow, extranonce2Start: number) {
-  return {
+  const base = {
     jobId: job.id,
     templateId: job.hashimon_id,
     expiresAt: job.expires_at,
@@ -89,6 +110,17 @@ export function jobResponse(job: MiningJobRow, extranonce2Start: number) {
     header: job.header,
     dnaBinding: "verified" as const,
     mode: job.mode,
+  };
+
+  const bitcoin = (job.header as StoredHeader).bitcoin;
+  if (job.mode !== "bitcoin" || !bitcoin) {
+    return base;
+  }
+
+  const { prevhashBE, versionHex, bits, merkleBranch, coinbasePrefix, coinbaseSuffix, extranonce2Size, versionBits } = bitcoin;
+  return {
+    ...base,
+    bitcoin: { prevhashBE, versionHex, bits, merkleBranch, coinbasePrefix, coinbaseSuffix, extranonce2Size, versionBits },
   };
 }
 
