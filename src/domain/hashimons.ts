@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { query, withTransaction } from "@/db/pool";
 import { audit } from "@/domain/audit";
-import { Dna, progressionOf, verifyStoredPow, type PowRecord, CORE_VERSION } from "@/core/index";
+import { Dna, progressionOf, verifyStoredPow, type PowRecord, type BitcoinShareSnapshot, CORE_VERSION } from "@/core/index";
 import { Hashimons } from "@/data/species";
 
 //The stored row. Note what is NOT here: no stats, no colours, no type. Those are
@@ -22,6 +22,7 @@ export interface HashimonRow {
   best_share_hash: string | null;
   best_share_nonce: number | null;
   best_share_extranonce2: number | null;
+  best_share_bitcoin: BitcoinShareSnapshot | null;
   extranonce2: number;
   total_hashes: number;
   valid_shares: number;
@@ -34,6 +35,7 @@ function powOf(row: HashimonRow): PowRecord {
     bestShareHash: row.best_share_hash,
     bestShareNonce: row.best_share_nonce,
     bestShareExtranonce2: row.best_share_extranonce2,
+    bestShareBitcoin: row.best_share_bitcoin,
     totalHashes: row.total_hashes,
     extranonce2: row.extranonce2,
     validShares: row.valid_shares,

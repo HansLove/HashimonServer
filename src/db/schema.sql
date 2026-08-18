@@ -68,6 +68,12 @@ CREATE INDEX IF NOT EXISTS hashimons_owner_idx ON hashimons(owner_id);
 -- Bound-mode PoW: extranonce2 at time of best share (null = legacy single-counter shares).
 ALTER TABLE hashimons ADD COLUMN IF NOT EXISTS best_share_extranonce2 bigint;
 
+-- Bitcoin-mode PoW: the template snapshot (prevhash, bits, merkle branch, coinbase
+-- prefix/suffix, nTime) used for the best share, captured at submit time because the
+-- source mining_jobs row and in-memory template cache are not guaranteed to survive
+-- (see core/pow.ts::BitcoinShareSnapshot). Null for bound/legacy best shares.
+ALTER TABLE hashimons ADD COLUMN IF NOT EXISTS best_share_bitcoin jsonb;
+
 -- Active mining jobs (TTL ~15 min). Client fetches before grinding.
 CREATE TABLE IF NOT EXISTS mining_jobs (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),

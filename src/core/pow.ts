@@ -63,11 +63,17 @@ export interface VerifyJobShareResult {
   progression: { tier: number; stars: number; stage: number };
 }
 
+/** Template fields needed to recompute a stored bitcoin-mode best share; captured at
+ *  submit time because the source template is not guaranteed to survive (mining_jobs
+ *  rows expire and the in-memory template cache rotates every templateRefreshMs). */
+export type BitcoinShareSnapshot = Omit<BitcoinJobInput, "extranonce1" | "extranonce2" | "nonceHex">;
+
 export interface PowRecord {
   bestShareBits: number;
   bestShareHash: string | null;
   bestShareNonce: number | null;
   bestShareExtranonce2?: number | null;
+  bestShareBitcoin?: BitcoinShareSnapshot | null;
   totalHashes: number;
   extranonce2: number;
   validShares: number;
@@ -80,6 +86,7 @@ export function emptyPow(): PowRecord {
     bestShareHash: null,
     bestShareNonce: null,
     bestShareExtranonce2: null,
+    bestShareBitcoin: null,
     totalHashes: 0,
     extranonce2: 0,
     validShares: 0,
@@ -140,7 +147,7 @@ export function hashShare(dna: string, nonce: number | string): string {
   return hashShareLegacy(dna, nonce);
 }
 
-function doubleSha256Buffer(input: Buffer | string): Buffer {
+export function doubleSha256Buffer(input: Buffer | string): Buffer {
   const buf = typeof input === "string" ? Buffer.from(input, "utf8") : input;
   const h1 = createHash("sha256").update(buf).digest();
   return createHash("sha256").update(h1).digest();
@@ -236,7 +243,14 @@ export function verifyStoredPow(dna: string, pow: PowRecord): StoredShareVerdict
   }
 
   let recomputed: string;
-  if (pow.bestShareExtranonce2 != null) {
+  if (pow.bestShareBitcoin) {
+    recomputed = hashBitcoinJob({
+      ...pow.bestShareBitcoin,
+      extranonce1: deriveExtranonce1(dna),
+      extranonce2: (pow.bestShareExtranonce2 ?? 0).toString(16).padStart(pow.bestShareBitcoin.extranonce2Size * 2, "0"),
+      nonceHex: pow.bestShareNonce.toString(16).padStart(8, "0"),
+    }).hashBE;
+  } else if (pow.bestShareExtranonce2 != null) {
     recomputed = hashShareBound(
       dna,
       deriveExtranonce1(dna),

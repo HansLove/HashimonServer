@@ -14,8 +14,10 @@ import {
   verifyStoredPow,
   verifyJobShare,
   emptyPow,
+  hashBitcoinJob,
   type PowRecord,
   type MiningJobRecord,
+  type BitcoinShareSnapshot,
 } from "@/core/pow";
 
 const TEST_DNA = "deadbeef".repeat(8);
@@ -112,6 +114,38 @@ test("verifyStoredPow accepts bound share", () => {
     bestShareExtranonce2: 0,
   };
   assert.equal(verifyStoredPow(TEST_DNA, pow).status, "ok");
+});
+
+test("verifyStoredPow accepts bitcoin share and rejects a tampered template", () => {
+  const snapshot: BitcoinShareSnapshot = {
+    prevhashBE: "00".repeat(32),
+    versionHex: "20000000",
+    bits: "1d00ffff",
+    merkleBranch: ["11".repeat(32), "22".repeat(32)],
+    coinbasePrefix: "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08",
+    coinbaseSuffix: "ffffffff0100f2052a010000000000000000",
+    extranonce2Size: 4,
+    nTimeHex: "00000001",
+  };
+  const { hashBE } = hashBitcoinJob({
+    ...snapshot,
+    extranonce1: deriveExtranonce1(TEST_DNA),
+    extranonce2: "00000000",
+    nonceHex: "00000000",
+  });
+
+  const pow: PowRecord = {
+    ...emptyPow(),
+    bestShareBits: leadingZeroBits(hashBE),
+    bestShareHash: hashBE,
+    bestShareNonce: 0,
+    bestShareExtranonce2: 0,
+    bestShareBitcoin: snapshot,
+  };
+  assert.equal(verifyStoredPow(TEST_DNA, pow).status, "ok");
+
+  const tampered: PowRecord = { ...pow, bestShareBitcoin: { ...snapshot, bits: "1d00fffe" } };
+  assert.equal(verifyStoredPow(TEST_DNA, tampered).status, "mismatch");
 });
 
 function boundJob(): MiningJobRecord {

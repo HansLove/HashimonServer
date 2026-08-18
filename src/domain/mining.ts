@@ -8,6 +8,7 @@ import {
   type MiningJobRecord,
   type ShareSubmitInput,
   type JobHeader,
+  type BitcoinShareSnapshot,
 } from "@/core/pow";
 import { getPreparedTemplate } from "@/domain/block-template";
 import type { HashimonRow } from "@/domain/hashimons";
@@ -173,6 +174,20 @@ export async function submitShare(
         : 0;
       const newExtranonce2 = Math.max(Number(row.extranonce2), body.extranonce2 + 1);
       const updateBest = result.bits > row.best_share_bits;
+      const bitcoinSnapshot: BitcoinShareSnapshot | null =
+        job.mode === "bitcoin" && job.bitcoin
+          ? {
+              prevhashBE: job.bitcoin.prevhashBE,
+              versionHex: job.bitcoin.versionHex,
+              bits: job.bitcoin.bits,
+              merkleBranch: job.bitcoin.merkleBranch,
+              coinbasePrefix: job.bitcoin.coinbasePrefix,
+              coinbaseSuffix: job.bitcoin.coinbaseSuffix,
+              extranonce2Size: job.bitcoin.extranonce2Size,
+              versionBits: job.bitcoin.versionBits,
+              nTimeHex: job.header.timestamp.toString(16).padStart(8, "0"),
+            }
+          : null;
 
       const updateRes = await query<HashimonRow>(
         `UPDATE hashimons SET
@@ -182,7 +197,8 @@ export async function submitShare(
            best_share_bits = CASE WHEN $4 THEN $5 ELSE best_share_bits END,
            best_share_hash = CASE WHEN $4 THEN $6 ELSE best_share_hash END,
            best_share_nonce = CASE WHEN $4 THEN $7 ELSE best_share_nonce END,
-           best_share_extranonce2 = CASE WHEN $4 THEN $8 ELSE best_share_extranonce2 END
+           best_share_extranonce2 = CASE WHEN $4 THEN $8 ELSE best_share_extranonce2 END,
+           best_share_bitcoin = CASE WHEN $4 THEN $9 ELSE best_share_bitcoin END
          WHERE id = $1
          RETURNING *`,
         [
@@ -194,6 +210,7 @@ export async function submitShare(
           result.hash,
           body.nonce,
           body.extranonce2,
+          bitcoinSnapshot ? JSON.stringify(bitcoinSnapshot) : null,
         ],
         client
       );
