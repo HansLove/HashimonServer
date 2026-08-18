@@ -4,6 +4,7 @@ import { query } from "@/db/pool";
 import { config } from "@/config";
 import { AppError } from "@/http/errors";
 import {
+  encPrivateKeyToBase64,
   encryptPrivateKey,
   generateSecp256k1Keypair,
   isValidCompressedPublicKey,
@@ -107,14 +108,6 @@ export async function playerForToken(token: string): Promise<Player | null> {
   return res.rows[0] ?? null;
 }
 
-const GENESIS_KEYS = new Set([
-  "genesis_fuego",
-  "genesis_agua",
-  "genesis_aire",
-  "genesis_tierra",
-  "genesis_electrico",
-]);
-
 export async function registerOwner(input: {
   username: string;
   password: string;
@@ -134,13 +127,20 @@ export async function registerOwner(input: {
   if (input.password.length < 8) {
     throw new AppError(422, "password must be at least 8 characters", "invalid_password");
   }
-  if (!GENESIS_KEYS.has(input.speciesKey) || !Hashimons[input.speciesKey] || !isGenesisSpecies(input.speciesKey)) {
+  if (!isGenesisSpecies(input.speciesKey) || !Hashimons[input.speciesKey]) {
     throw new AppError(422, "speciesKey must be a genesis starter element", "invalid_species");
   }
 
   const existing = await getPlayerByUsername(username);
   if (existing) {
     throw new AppError(409, "username already registered", "username_taken");
+  }
+
+  if (input.custody === "player" && !input.publicKey) {
+    throw new AppError(422, "custody player requires publicKey", "invalid_custody");
+  }
+  if (input.custody === "server_encrypted" && input.publicKey) {
+    throw new AppError(422, "custody server_encrypted is incompatible with a supplied publicKey", "invalid_custody");
   }
 
   let publicKey: string;
@@ -161,16 +161,12 @@ export async function registerOwner(input: {
     custody = "player";
   } else {
     const kp = generateSecp256k1Keypair();
-    const enc = encryptPrivateKey(kp.privateKeyHex, input.password);
+    const enc = await encryptPrivateKey(kp.privateKeyHex, input.password);
     publicKey = kp.publicKeyHex;
     custody = "server_encrypted";
     encPrivateKey = enc.ciphertext;
     kdfSalt = enc.kdfSalt;
     kdfParams = enc.kdfParams;
-  }
-
-  if (input.custody === "player" && !input.publicKey) {
-    throw new AppError(422, "custody player requires publicKey", "invalid_custody");
   }
 
   const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
@@ -199,7 +195,7 @@ export async function registerOwner(input: {
     player = inserted.rows[0]!;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("players_username_lower_idx") || msg.includes("username")) {
+    if (msg.includes("players_username_lower_idx")) {
       throw new AppError(409, "username already registered", "username_taken");
     }
     if (msg.includes("public_key")) {
@@ -208,19 +204,28 @@ export async function registerOwner(input: {
     throw err;
   }
 
-  const row: HashimonRow = await emit({
-    ownerId: player.id,
-    speciesKey: input.speciesKey,
-    provenance: "starter",
-  });
-  const session = await createSession(player.id);
-
-  return {
-    player,
-    session,
-    hashimon: present(row),
-    created: true,
-  };
+  try {
+    const row: HashimonRow = await emit({
+      ownerId: player.id,
+      speciesKey: input.speciesKey,
+      provenance: "starter",
+    });
+    const session = await createSession(player.id);
+    return {
+      player,
+      session,
+      hashimon: present(row),
+      created: true,
+    };
+  } catch (err) {
+    // emit()/createSession() failed after the player row already committed — the
+    // INSERT above is not part of that transaction (emit owns its own), so without
+    // this the username would be permanently orphaned (registered but unusable).
+    // ponytail: best-effort compensating delete, not a real distributed transaction —
+    // revisit if emit() ever accepts an external client to share one transaction.
+    await query(`DELETE FROM players WHERE id = $1`, [player.id]).catch(() => {});
+    throw err;
+  }
 }
 
 export async function loginOwner(username: string, password: string): Promise<{
@@ -243,7 +248,7 @@ export async function loginOwner(username: string, password: string): Promise<{
     player,
     session,
     encPrivateKeyBase64: player.enc_private_key
-      ? Buffer.from(player.enc_private_key).toString("base64")
+      ? encPrivateKeyToBase64(player.enc_private_key)
       : null,
     kdfSalt: player.kdf_salt,
     kdfParams: player.kdf_params,

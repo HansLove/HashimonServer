@@ -25,10 +25,10 @@ describe("crypto / ownership helpers", () => {
     assert.notEqual(h, luantiPasswordHash("hans", "secret123"));
   });
 
-  it("generates and round-trips encrypted private keys", () => {
+  it("generates and round-trips encrypted private keys", async () => {
     const kp = generateSecp256k1Keypair();
     assert.equal(isValidCompressedPublicKey(kp.publicKeyHex), true);
-    const enc = encryptPrivateKey(kp.privateKeyHex, "password123");
+    const enc = await encryptPrivateKey(kp.privateKeyHex, "password123");
     const plain = decryptPrivateKey(enc.ciphertext, "password123", enc.kdfSalt, enc.kdfParams);
     assert.equal(plain, kp.privateKeyHex);
   });

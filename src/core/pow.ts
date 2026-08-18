@@ -244,10 +244,16 @@ export function verifyStoredPow(dna: string, pow: PowRecord): StoredShareVerdict
 
   let recomputed: string;
   if (pow.bestShareBitcoin) {
+    // bestShareExtranonce2 must be stored alongside bestShareBitcoin (submitShare
+    // always writes both together) — treat a missing one as corrupted data rather
+    // than silently recomputing against a fabricated extranonce2 of 0.
+    if (pow.bestShareExtranonce2 == null) {
+      return { status: "mismatch", claimedHash: pow.bestShareHash, recomputedHash: "" };
+    }
     recomputed = hashBitcoinJob({
       ...pow.bestShareBitcoin,
       extranonce1: deriveExtranonce1(dna),
-      extranonce2: (pow.bestShareExtranonce2 ?? 0).toString(16).padStart(pow.bestShareBitcoin.extranonce2Size * 2, "0"),
+      extranonce2: pow.bestShareExtranonce2.toString(16).padStart(pow.bestShareBitcoin.extranonce2Size * 2, "0"),
       nonceHex: pow.bestShareNonce.toString(16).padStart(8, "0"),
     }).hashBE;
   } else if (pow.bestShareExtranonce2 != null) {

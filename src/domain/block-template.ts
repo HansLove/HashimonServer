@@ -22,6 +22,10 @@ export interface PreparedTemplate {
 const EXTRANONCE1_SIZE = 4;
 const EXTRANONCE2_SIZE = 4;
 const COINBASE_TAG_ASCII = "hashimon";
+const RPC_TIMEOUT_MS = 5_000;
+// ponytail: fixed multiplier, not config — promote to an env var if an operator
+// ever needs to tune how long a stale template is served during a node outage.
+const MAX_STALE_MS = 20 * 60_000;
 
 let cached: PreparedTemplate | null = null;
 
@@ -36,6 +40,12 @@ export async function getPreparedTemplate(now = Date.now()): Promise<PreparedTem
   } catch (err: unknown) {
     const host = safeHost(config.btcNodeUrl);
     console.error("block-template: getPreparedTemplate failed", { host, message: (err as Error).message });
+    if (cached && now - cached.fetchedAt > MAX_STALE_MS) {
+      // Serving an arbitrarily stale template isn't "degrading gracefully" anymore —
+      // past this ceiling, mining against a long-superseded block is worse than no
+      // bitcoin-mode job at all. Callers (mining.ts::issueJob) fall back to 'bound'.
+      return null;
+    }
     return cached;
   }
 }
@@ -64,6 +74,7 @@ async function fetchRawTemplate(): Promise<RawGetBlockTemplateResult> {
       method: "getblocktemplate",
       params: [{ rules: ["segwit"] }],
     }),
+    signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
   });
 
   if (!res.ok) {

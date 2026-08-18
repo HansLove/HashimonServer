@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { config } from "@/config";
@@ -18,7 +19,13 @@ function requireLuantiSecret(req: { header: (n: string) => string | undefined })
     throw new AppError(503, "LUANTI_SERVER_SECRET not configured", "misconfigured");
   }
   const provided = req.header("x-luanti-secret") ?? "";
-  if (provided !== secret) {
+  const providedBuf = Buffer.from(provided);
+  const secretBuf = Buffer.from(secret);
+  // Constant-time compare: this secret gates an endpoint that discloses Luanti
+  // password hashes and mints bearer sessions, so a timing side-channel matters.
+  // Length must match before timingSafeEqual (it throws on mismatched lengths).
+  const matches = providedBuf.length === secretBuf.length && timingSafeEqual(providedBuf, secretBuf);
+  if (!matches) {
     throw new AppError(401, "invalid luanti server secret", "unauthorized");
   }
 }

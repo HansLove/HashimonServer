@@ -1,5 +1,14 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt, scryptSync, type ScryptOptions } from "node:crypto";
 import * as secp from "@noble/secp256k1";
+
+function scryptAsync(password: string, salt: Buffer, keylen: number, options: ScryptOptions): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, keylen, options, (err, derivedKey) => {
+      if (err) { reject(err); return; }
+      resolve(derivedKey);
+    });
+  });
+}
 
 export const LUANTI_USERNAME_RE = /^[A-Za-z0-9_-]{1,20}$/;
 
@@ -46,10 +55,12 @@ export interface EncryptedPrivateKey {
 
 const SCRYPT = { N: 16384, r: 8, p: 1, dkLen: 32 } as const;
 
-/** Encrypt secp256k1 private key hex with a key derived from the account password. */
-export function encryptPrivateKey(privateKeyHex: string, password: string): EncryptedPrivateKey {
+/** Encrypt secp256k1 private key hex with a key derived from the account password.
+ *  Uses the async scrypt (not scryptSync) so this doesn't block the event loop on
+ *  every registration — scrypt at N=16384 is deliberately CPU-heavy. */
+export async function encryptPrivateKey(privateKeyHex: string, password: string): Promise<EncryptedPrivateKey> {
   const salt = randomBytes(16);
-  const key = scryptSync(password, salt, SCRYPT.dkLen, {
+  const key = await scryptAsync(password, salt, SCRYPT.dkLen, {
     N: SCRYPT.N,
     r: SCRYPT.r,
     p: SCRYPT.p,
