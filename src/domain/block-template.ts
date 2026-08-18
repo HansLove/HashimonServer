@@ -2,8 +2,8 @@
 //reduces it to a compact, creature-agnostic PreparedTemplate (coinbase split around the
 //extranonce hole + merkle branch), and caches it so every job in the TTL window reuses one
 //RPC round-trip instead of re-pulling a multi-MB template per creature.
-import { createHash } from "node:crypto";
 import { config } from "@/config";
+import { doubleSha256Buffer } from "@/core/pow";
 
 export interface PreparedTemplate {
   templateId: string;
@@ -109,7 +109,7 @@ function prepareTemplate(raw: RawGetBlockTemplateResult, now: number): PreparedT
 //Coinbase raw tx, split around the extranonce1+extranonce2 hole so hashJob() (core/pow.ts)
 //can splice per-share values in without reparsing the transaction. No witness commitment
 //output and a placeholder OP_RETURN payout — this template is never submitted to the network
-//(see plan: "Solo template real, sin submitblock"), so neither is required for hashing to be
+//(submitblock is explicitly out of scope), so neither is required for hashing to be
 //valid proof of work against the real header.
 //ponytail: OP_RETURN payout, no witness commitment — add both if this ever grows a submitblock path.
 function buildCoinbase(height: number, coinbaseValueSats: number): { prefix: string; suffix: string } {
@@ -186,9 +186,4 @@ export function computeMerkleBranch(txidsBE: string[]): string[] {
   }
 
   return branch.map((b) => Buffer.from(b).reverse().toString("hex"));
-}
-
-function doubleSha256Buffer(input: Buffer): Buffer {
-  const h1 = createHash("sha256").update(input).digest();
-  return createHash("sha256").update(h1).digest();
 }

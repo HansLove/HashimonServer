@@ -5,13 +5,8 @@
 //sibling at some level or a broken odd-duplication rule shows up only at that scale.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { computeMerkleBranch, getPreparedTemplate } from "@/domain/block-template";
-
-function doubleSha256Buffer(input: Buffer): Buffer {
-  const h1 = createHash("sha256").update(input).digest();
-  return createHash("sha256").update(h1).digest();
-}
+import { doubleSha256Buffer } from "@/core/pow";
 
 //Full pairwise merkle tree (duplicate-last-if-odd), written independently from the
 //production peel-loop, over leaves given in display (BE) hex.
