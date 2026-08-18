@@ -78,7 +78,7 @@ hashimonsRouter.get(
 
 const shareSchema = z.object({
   jobId: z.string().uuid(),
-  extranonce2: z.number().int().min(0),
+  extranonce2: z.number().int().min(0).max(0xffffffff),
   nonce: z.number().int().min(0).max(0xffffffff),
   hash: z.string().optional(),
   totalHashesAttempted: z.number().int().min(0).optional(),
