@@ -4,6 +4,7 @@
 //RPC round-trip instead of re-pulling a multi-MB template per creature.
 import { config } from "@/config";
 import { doubleSha256Buffer } from "@/core/pow";
+import { decodeSegwitAddress, segwitScriptPubKeyHex } from "@/domain/bitcoin-address";
 
 export interface PreparedTemplate {
   templateId: string;
@@ -117,12 +118,18 @@ function prepareTemplate(raw: RawGetBlockTemplateResult, now: number): PreparedT
   };
 }
 
+//Payout scriptPubKey for the coinbase output, decoded from config.coinbaseAddress on
+//first bitcoin-mode job issuance (not at import) — a malformed address throws out of
+//buildCoinbase() with a clear decodeSegwitAddress error at that point, not at startup.
+const payoutScriptPubKeyHex = (): string => segwitScriptPubKeyHex(decodeSegwitAddress(config.coinbaseAddress));
+
 //Coinbase raw tx, split around the extranonce1+extranonce2 hole so hashJob() (core/pow.ts)
 //can splice per-share values in without reparsing the transaction. No witness commitment
-//output and a placeholder OP_RETURN payout — this template is never submitted to the network
-//(submitblock is explicitly out of scope), so neither is required for hashing to be
-//valid proof of work against the real header.
-//ponytail: OP_RETURN payout, no witness commitment — add both if this ever grows a submitblock path.
+//output — this template is never submitted to the network (submitblock is explicitly out
+//of scope), so it isn't required for hashing to be valid proof of work against the real
+//header. The payout itself is real (config.coinbaseAddress) so the transaction stays
+//well-formed if a submitblock path is ever added.
+//ponytail: no witness commitment output — add one if this ever grows a submitblock path.
 function buildCoinbase(height: number, coinbaseValueSats: number): { prefix: string; suffix: string } {
   const heightPush = bip34HeightPush(height);
   const extranonceHoleBytes = EXTRANONCE1_SIZE + EXTRANONCE2_SIZE;
@@ -138,6 +145,9 @@ function buildCoinbase(height: number, coinbaseValueSats: number): { prefix: str
   const valueLE = Buffer.alloc(8);
   valueLE.writeBigUInt64LE(BigInt(coinbaseValueSats));
 
+  const scriptPubKey = payoutScriptPubKeyHex();
+  const scriptPubKeyLen = (scriptPubKey.length / 2).toString(16).padStart(2, "0");
+
   const prefix =
     "01000000" + // version = 1, LE
     "01" + // input count
@@ -151,8 +161,8 @@ function buildCoinbase(height: number, coinbaseValueSats: number): { prefix: str
     "ffffffff" + // sequence
     "01" + // output count
     valueLE.toString("hex") +
-    "01" + // scriptPubKey length
-    "6a" + // OP_RETURN — unspendable placeholder, see note above
+    scriptPubKeyLen +
+    scriptPubKey +
     "00000000"; // locktime
 
   return { prefix, suffix };
