@@ -5,3 +5,4 @@ dist/
 .DS_Store
 .secrets
 .claude/worktrees/
+CLAUDE.local.md
