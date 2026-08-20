@@ -2,9 +2,11 @@
 
 Paper técnico de referencia: cómo nace un Hashimon, cómo se determina su tipo elemental (fuego, metal, etc.), cómo se construye el prompt de imagen y qué es genético vs ganado por minería.
 
+> ⚠️ **Aviso de obsolescencia (2026-08-20):** este documento describe, en varias secciones, un cliente `game/Content/*.js` que **ya no existe en este repo**, y una lista de **13 tipos elementales** (con Robot/Plasma/Plant como fusiones) que fue reemplazada por el árbol canónico de **16 tipos** (índice hex 0-F). El sistema vigente hoy es `encubation-website/src/lib/compiler.ts` + su puerto Lua, y la fórmula de ADN Genesis cambió (ya no usa `templateId:birthNonce`). Para el estado actual de tipos, arquetipos y fórmula de ADN, usa [`ADN_PROPIEDAD_TEORIA_DE_JUEGO.md`](./ADN_PROPIEDAD_TEORIA_DE_JUEGO.md) como fuente de verdad — este archivo queda como referencia histórica del diseño del compilador y del sistema de prompts, que en buena parte sigue siendo conceptualmente válido.
+
 **Estado:** documentación del sistema actual  
 **Audiencia:** backend, frontend `game/`, integración 3D Luanti  
-**Última revisión:** 2026-08-10
+**Última revisión:** 2026-08-10 — **secciones 3, 5 y 10.1 desactualizadas, ver aviso arriba**
 
 Documentos relacionados: [ADN y evolución (guía)](./HASHIMON_ADN_Y_EVOLUCION.md) · [PoW bound mode](./POW_SPEC.md) · [White Paper v2](./Hashimon_white_paper_2_V1.md)
 
