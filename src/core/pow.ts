@@ -5,7 +5,7 @@ import { doubleSha256 } from "@/core/sha256";
 
 export const BITS_PER_STAR = 4;
 export const MAX_STAGE = 33;
-export const DEFAULT_SHARE_TARGET_BITS = 12;
+export const DEFAULT_SHARE_TARGET_BITS = 20;
 export const DEFAULT_BLOCK_TARGET_BITS = 64;
 /** @deprecated use DEFAULT_SHARE_TARGET_BITS — kept for legacy client parity */
 export const SHARE_TARGET_BITS = 10;
