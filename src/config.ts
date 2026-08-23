@@ -8,12 +8,21 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function parseCorsOrigin(raw: string | undefined): string | string[] {
-  const value = raw ?? "http://localhost:8080";
-  if (value.includes(",")) {
-    return value.split(",").map((s) => s.trim()).filter(Boolean);
-  }
-  return value;
+const DEFAULT_CORS_ORIGINS = [
+  "https://ihashima.com",
+  "https://www.ihashima.com",
+  "http://localhost:8080",
+  "http://127.0.0.1:8080",
+  "http://localhost:8081",
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:3000",
+];
+
+function parseCorsOrigin(raw: string | undefined): string[] {
+  const extra = (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return [...new Set([...DEFAULT_CORS_ORIGINS, ...extra])];
 }
 
 // "bitcoin" requires a client that implements hashBitcoinJob (src/core/pow.ts) —
@@ -29,7 +38,7 @@ export const config = {
   shareTargetBits: Number(process.env.HASHIMON_SHARE_TARGET_BITS ?? 20),
   jobTtlMs: Number(process.env.HASHIMON_JOB_TTL_MS ?? 900_000),
   blockTargetBits: Number(process.env.HASHIMON_BLOCK_TARGET_BITS ?? 64),
-  // Comma-separated list allowed (e.g. game + Lovable preview URL).
+  // Always includes https://ihashima.com; CORS_ORIGIN adds more origins.
   corsOrigin: parseCorsOrigin(process.env.CORS_ORIGIN),
   luantiServerSecret: process.env.LUANTI_SERVER_SECRET ?? "",
   // Bitcoin Core RPC URL with basic-auth credentials embedded (user:pass@host:port).

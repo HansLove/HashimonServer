@@ -12,7 +12,14 @@ import { errorMiddleware } from "@/http/errors";
 
 export function createApp() {
   const app = express();
-  app.use(cors({ origin: config.corsOrigin, credentials: true }));
+  app.use(
+    cors({
+      origin: config.corsOrigin,
+      credentials: true,
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization"],
+    })
+  );
   app.use(express.json());
 
   app.use(healthRouter);
