@@ -41,6 +41,7 @@ jobs:
         run: |
           SHA="${{ inputs.sha || github.sha }}"
           echo "image=${IMAGE_REPO}:sha-${SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -50,6 +51,7 @@ jobs:
           tags: ${{ steps.tag.outputs.image }}
           build-args: |
             BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
+            COMMIT_SHA=${{ steps.tag.outputs.sha }}
           cache-from: type=registry,ref=${{ env.IMAGE_REPO }}:buildcache
           cache-to: type=registry,ref=${{ env.IMAGE_REPO }}:buildcache,mode=max
           # DOCR does not support provenance attestations
