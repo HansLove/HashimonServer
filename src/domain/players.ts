@@ -3,6 +3,7 @@ import argon2 from "argon2";
 import { query } from "@/db/pool";
 import { config } from "@/config";
 import { AppError } from "@/http/errors";
+import { elapsedMs, enrich } from "@/http/wide-event";
 import {
   encPrivateKeyToBase64,
   encryptPrivateKey,
@@ -169,7 +170,11 @@ export async function registerOwner(input: {
     kdfParams = enc.kdfParams;
   }
 
+  //argon2 is deliberately slow, so it dominates this route's duration_ms. Reported
+  //as its own field, otherwise every registration reads like a latency anomaly.
+  const hashStartedAt = process.hrtime.bigint();
   const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
+  enrich({ custody, argon2_ms: elapsedMs(hashStartedAt) });
   const luantiPassword = luantiPasswordHash(username, input.password);
 
   let player: Player;
@@ -211,6 +216,7 @@ export async function registerOwner(input: {
       provenance: "starter",
     });
     const session = await createSession(player.id);
+    enrich({ player_id: player.id, starter_emitted: true });
     return {
       player,
       session,
@@ -235,14 +241,22 @@ export async function loginOwner(username: string, password: string): Promise<{
   kdfSalt: string | null;
   kdfParams: Record<string, unknown> | null;
 }> {
+  //The response deliberately collapses both failures into one 401 so it leaks no
+  //account existence. The event does not have to: operationally, a spike of
+  //bad_password on existing accounts and a spike of no_user are different incidents.
   const player = await getPlayerByUsername(username.trim());
   if (!player || !player.password_hash) {
+    enrich({ login_result: "no_user" });
     throw new AppError(401, "invalid username or password", "invalid_credentials");
   }
+  const verifyStartedAt = process.hrtime.bigint();
   const ok = await argon2.verify(player.password_hash, password);
+  enrich({ argon2_ms: elapsedMs(verifyStartedAt) });
   if (!ok) {
+    enrich({ login_result: "bad_password", player_id: player.id });
     throw new AppError(401, "invalid username or password", "invalid_credentials");
   }
+  enrich({ login_result: "ok", player_id: player.id, custody: player.custody });
   const session = await createSession(player.id);
   return {
     player,

@@ -40,6 +40,10 @@ export function wideEventMiddleware(logger: Logger = defaultLogger) {
       event: "http_request",
       request_id: randomUUID(),
       method: req.method,
+      //Overwritten by whatever actually proves identity: requireSession, the
+      //Luanti secret gate, or POST /session. "none" is the truthful default for a
+      //request that proved nothing.
+      auth_source: "none",
       db_query_count: 0,
       db_duration_ms: 0,
     };
@@ -57,7 +61,7 @@ export function wideEventMiddleware(logger: Logger = defaultLogger) {
         if (!req.route) { event.path_raw = req.originalUrl; }
         event.status_code = res.statusCode;
         event.outcome = outcomeFor(res.statusCode);
-        event.duration_ms = round(Number(process.hrtime.bigint() - startedAt) / 1e6);
+        event.duration_ms = elapsedMs(startedAt);
         if (res.statusCode >= 500) {
           logger.error(event);
           return;
@@ -67,6 +71,11 @@ export function wideEventMiddleware(logger: Logger = defaultLogger) {
       next();
     });
   };
+}
+
+//Shared so every duration that lands in an event is measured and rounded alike.
+export function elapsedMs(startedAt: bigint): number {
+  return round(Number(process.hrtime.bigint() - startedAt) / 1e6);
 }
 
 function outcomeFor(status: number): string {

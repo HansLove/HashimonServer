@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { createSession, findOrCreatePlayer } from "@/domain/players";
 import { asyncHandler } from "@/http/errors";
+import { enrich } from "@/http/wide-event";
 
 export const sessionRouter = Router();
 
@@ -17,6 +18,13 @@ sessionRouter.post(
   asyncHandler(async (req, res) => {
     const input = bodySchema.parse(req.body ?? {});
     const { player, created } = await findOrCreatePlayer(input);
+    enrich({
+      player_id: player.id,
+      auth_source: "anonymous",
+      player_created: created,
+      has_public_key: Boolean(player.public_key),
+      custody: player.custody,
+    });
     const session = await createSession(player.id);
     res.status(created ? 201 : 200).json({
       token: session.token,

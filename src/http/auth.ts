@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
-import { playerForToken, type Player } from "@/domain/players";
+import { canOwn, playerForToken, type Player } from "@/domain/players";
 import { AppError, asyncHandler } from "@/http/errors";
+import { enrich } from "@/http/wide-event";
 
 //Augment Express's Request so downstream handlers see req.player typed.
 declare global {
@@ -23,6 +24,14 @@ export const requireSession = asyncHandler(async (req: Request, _res: Response, 
   const player = await playerForToken(match[1]!.trim());
   if (!player) { throw new AppError(401, "invalid or expired session", "unauthenticated"); }
 
+  //Identity on the event as soon as it is proven, so even a request that fails
+  //further down says who was making it.
+  enrich({
+    player_id: player.id,
+    auth_source: "session",
+    custody: player.custody,
+    can_own: canOwn(player),
+  });
   req.player = player;
   next();
 });

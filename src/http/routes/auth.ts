@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { asyncHandler } from "@/http/errors";
+import { enrich } from "@/http/wide-event";
 import { loginOwner, presentPlayer, registerOwner } from "@/domain/players";
 
 export const authRouter = Router();
@@ -17,6 +18,12 @@ authRouter.post(
   "/register",
   asyncHandler(async (req, res) => {
     const input = registerSchema.parse(req.body ?? {});
+    //Enriched here, before the domain call, so a registration that dies on
+    //validation still says which species and key path it was attempting.
+    enrich({
+      species_key: input.speciesKey,
+      key_source: input.publicKey ? "client" : "generated",
+    });
     const result = await registerOwner(input);
     res.status(201).json({
       token: result.session.token,

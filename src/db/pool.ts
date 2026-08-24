@@ -1,6 +1,6 @@
 import pg from "pg";
 import { config } from "@/config";
-import { trackDbQuery } from "@/http/wide-event";
+import { elapsedMs, trackDbQuery } from "@/http/wide-event";
 
 //pg numeric types: bigint (int8) comes back as a string by default to avoid
 //precision loss. Our bigints (totalHashes, extranonce2) fit in a JS number for
@@ -22,7 +22,7 @@ export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   } finally {
     //Aggregate, never per query: the request's wide event carries the totals. A
     //failed query still counts — its time is time the request spent.
-    trackDbQuery(Number(process.hrtime.bigint() - startedAt) / 1e6);
+    trackDbQuery(elapsedMs(startedAt));
   }
 }
 
