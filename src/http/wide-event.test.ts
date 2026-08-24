@@ -18,8 +18,9 @@ async function request(path: string): Promise<Record<string, unknown>> {
   try {
     await new Promise((resolve) => server.once("listening", resolve));
     const { port } = server.address() as AddressInfo;
-    await fetch(`http://127.0.0.1:${port}${path}`);
-    //finish fires after fetch resolves its headers; yield once so the listener runs.
+    //Drain the body: fetch resolves on headers alone, which can beat the server's
+    //own finish event. A fully read body means the response was already flushed.
+    await (await fetch(`http://127.0.0.1:${port}${path}`)).text();
     await new Promise((resolve) => setImmediate(resolve));
   } finally {
     server.close();
@@ -36,7 +37,7 @@ test("an unmatched request emits one event with the raw path", async () => {
   assert.equal(typeof event.request_id, "string");
   assert.equal(event.method, "GET");
   assert.equal(event.path, "unmatched");
-  assert.equal(event.path_raw, "/nope?q=1");
+  assert.equal(event.path_raw, "/nope");
   assert.equal(event.status_code, 404);
   assert.equal(event.outcome, "client_error");
   assert.equal(typeof event.duration_ms, "number");

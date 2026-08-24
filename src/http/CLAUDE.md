@@ -34,9 +34,11 @@ happen *inside* the event's `store.run()` and land in the same line — moving i
 later silently drops those failures from the log.
 
 **Path over URL, always.** The finish handler prefers `req.route` (the matched
-route template, e.g. `/hashimons/:id`) over `req.originalUrl`; an unmatched request
-falls back to `path: "unmatched"` plus a separate `path_raw`. Never log the raw URL
-on a matched route — resolved `:id`s would blow up log cardinality.
+route template, e.g. `/hashimons/:id`); an unmatched request falls back to
+`path: "unmatched"` plus a separate `path_raw` taken from `req.path` — never
+`req.originalUrl`, whose query string is attacker-controlled and can smuggle a
+token past `redact`. Never log the raw URL on a matched route either — resolved
+`:id`s would blow up log cardinality.
 
 **AsyncLocalStorage, not `req.event`.** Chosen because `db/pool.ts` and mining/
 domain code never receive a `Request` object, so passing the event down would mean

@@ -55,10 +55,12 @@ export function wideEventMiddleware(logger: Logger = defaultLogger) {
     store.run(event, () => {
       res.on("finish", () => {
         //req.route only exists once routing matched; a 404 has none, so it falls
-        //back to the raw URL. Never req.url on a matched route: /hashimons/:id
+        //back to the raw path. Never req.url on a matched route: /hashimons/:id
         //resolved to real ids would blow up the cardinality of every query.
+        //req.path, not req.originalUrl: the query string is attacker-controlled and
+        //can carry a token, which redact cannot reach inside a URL string.
         event.path = req.route ? `${req.baseUrl}${req.route.path}` : "unmatched";
-        if (!req.route) { event.path_raw = req.originalUrl; }
+        if (!req.route) { event.path_raw = req.path; }
         event.status_code = res.statusCode;
         event.outcome = outcomeFor(res.statusCode);
         event.duration_ms = elapsedMs(startedAt);

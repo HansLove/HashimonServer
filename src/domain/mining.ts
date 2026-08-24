@@ -187,8 +187,12 @@ export async function submitShare(
     return { ok: false, error: "duplicate_share", hash: result.hash };
   }
 
+  //Read back after the transaction commits: an attempt that rolls back must not
+  //leave the event claiming hashes and a best share that were never persisted.
+  let isNewBest = false;
+  let hashDelta = 0;
   try {
-    return await withTransaction(async (client: DbClient) => {
+    const outcome = await withTransaction(async (client: DbClient) => {
       await query(
         `INSERT INTO submitted_shares (hash, hashimon_id, job_id, bits, extranonce2, nonce)
          VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -196,11 +200,12 @@ export async function submitShare(
         client
       );
 
-      const hashDelta = typeof body.totalHashesAttempted === "number" && body.totalHashesAttempted > 0
+      hashDelta = typeof body.totalHashesAttempted === "number" && body.totalHashesAttempted > 0
         ? body.totalHashesAttempted
         : 0;
       const newExtranonce2 = Math.max(Number(row.extranonce2), body.extranonce2 + 1);
       const updateBest = result.bits > row.best_share_bits;
+      isNewBest = updateBest;
       const bitcoinSnapshot: BitcoinShareSnapshot | null =
         job.mode === "bitcoin" && job.bitcoin
           ? {
@@ -243,11 +248,6 @@ export async function submitShare(
       );
 
       const updated = updateRes.rows[0]!;
-      enrich({
-        is_new_best: updateBest,
-        best_share_bits: updated.best_share_bits,
-        hash_delta: hashDelta,
-      });
       await audit(client, {
         playerId: row.owner_id,
         hashimonId: row.id,
@@ -257,6 +257,12 @@ export async function submitShare(
 
       return { ok: true as const, bits: result.bits, hash: result.hash, row: updated };
     });
+    enrich({
+      is_new_best: isNewBest,
+      best_share_bits: outcome.row.best_share_bits,
+      hash_delta: hashDelta,
+    });
+    return outcome;
   } catch (err: unknown) {
     if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505") {
       enrich({ reject_reason: "duplicate_share", dup_source: "pg_23505" });

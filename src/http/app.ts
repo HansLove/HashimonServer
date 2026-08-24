@@ -23,6 +23,9 @@ export function createApp(logger?: Logger) {
       credentials: true,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Content-Type", "Authorization"],
+      //Without this the browser hides X-Request-Id from cross-origin JS, so a
+      //client-side report cannot name the event it belongs to.
+      exposedHeaders: ["X-Request-Id"],
     })
   );
   app.use(express.json());
