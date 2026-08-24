@@ -139,6 +139,41 @@ curl -s -X POST localhost:4000/register -H 'content-type: application/json' \
 curl -s localhost:4000/internal/luanti-auth -H "X-Luanti-Secret: $LUANTI_SERVER_SECRET" | jq
 ```
 
+## Logging — one wide event per request
+
+The server does not scatter log lines through a handler. Every HTTP request produces
+**exactly one** JSON event, emitted when the response finishes, and every layer that
+learns something worth knowing adds a field to that event instead of printing its own
+line. Two levels only: `info` for what happened, `error` for what broke.
+
+```bash
+curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
+# {"level":"info","time":"2026-08-24T18:11:04.812Z","service":"hashimon-server",
+#  "env":"development","commit":"9ba76b6","instance":"hashimon-droplet",
+#  "core_version":"caos-core@1","algo_version":"caos-core@1","mining_mode":"bound",
+#  "event":"http_request","request_id":"3f2a…","method":"GET","path":"/profile",
+#  "auth_source":"session","player_id":"…","custody":"server_encrypted","can_own":true,
+#  "hashimon_count":3,"credits":0,"status_code":200,"outcome":"success",
+#  "duration_ms":12.4,"db_query_count":2,"db_duration_ms":4.1}
+```
+
+- **Envelope** (`src/logger.ts`): `service`, `env`, `commit`, `instance`, `core_version`,
+  `algo_version`, `mining_mode` — on every event. `commit` comes from `COMMIT_SHA`, baked
+  into the image as a build arg (`docker build --build-arg COMMIT_SHA=$(git rev-parse --short HEAD)`).
+- **Adding a field**: call `enrich({ … })` from `src/http/wide-event.ts` anywhere inside a
+  request — routes, domain code, the error middleware. It is a no-op outside a request, so
+  domain functions stay callable from `migrate.ts` and from tests.
+- **Emitting is not yours to do.** `wideEventMiddleware` is the only caller of `logger.info`
+  for requests; `errorMiddleware` enriches `error_code` and returns.
+- **Outside the request cycle** there are three events of their own: `server_start`,
+  `shutdown`, and `block_template_fetch` (only on a real RPC round-trip or a failure —
+  never on a cache hit, since the fetch is shared across all miners).
+- **Never put a secret in an event.** `redact` in `src/logger.ts` is a belt, not the rule:
+  identifiers go in prefixed (`dna_prefix`, 8 hex), and `config.btcNodeUrl` — which embeds
+  `user:pass@` — is logged only through `safeHost()`.
+- **`X-Request-Id`** is returned on every response, so a client report can be matched to
+  its event.
+
 ## Verified so far
 
 - `tsc --noEmit` — clean.
