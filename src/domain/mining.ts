@@ -12,6 +12,7 @@ import {
 } from "@/core/pow";
 import { getPreparedTemplate } from "@/domain/block-template";
 import type { HashimonRow } from "@/domain/hashimons";
+import { enrich } from "@/http/wide-event";
 
 type BitcoinPayload = NonNullable<MiningJobRecord["bitcoin"]>;
 type StoredHeader = JobHeader & { templateId?: string; bitcoin?: BitcoinPayload };
@@ -53,6 +54,18 @@ export async function issueJob(row: HashimonRow): Promise<MiningJobRow> {
   const prepared = config.miningMode === "bitcoin" ? await getPreparedTemplate(now) : null;
   const mode: MiningJobRow["mode"] = prepared ? "bitcoin" : "bound";
 
+  //Enriched here rather than in the route because this is where the degradation is
+  //visible: template_fallback true means bitcoin mode was configured and the node
+  //could not be reached, which until now was a silent downgrade to bound mode.
+  enrich({
+    job_mode: mode,
+    share_target_bits: shareTargetBits,
+    block_target_bits: config.blockTargetBits,
+    template_id: prepared?.templateId ?? null,
+    template_fallback: config.miningMode === "bitcoin" && !prepared,
+    template_age_ms: prepared ? now - prepared.fetchedAt : null,
+  });
+
   const header: StoredHeader = prepared
     ? {
         version: parseInt(prepared.versionHex, 16),
@@ -88,6 +101,7 @@ export async function issueJob(row: HashimonRow): Promise<MiningJobRow> {
       new Date(now + config.jobTtlMs).toISOString(),
     ]
   );
+  enrich({ job_id: res.rows[0]!.id });
   return res.rows[0]!;
 }
 
@@ -139,8 +153,16 @@ export async function submitShare(
 ): Promise<{ ok: true; bits: number; hash: string; row: HashimonRow } | { ok: false; error: string; bits?: number; hash?: string }> {
   const jobRow = await getJobForOwner(body.jobId, row.owner_id);
   if (!jobRow || jobRow.hashimon_id !== row.id) {
+    enrich({ reject_reason: "stale_job" });
     return { ok: false, error: "stale_job" };
   }
+  //Age of the job the client mined against: separates "the TTL is too short" from
+  //"this client took minutes to come back" when stale_job spikes.
+  enrich({
+    job_mode: jobRow.mode,
+    job_age_ms: Date.now() - new Date(jobRow.created_at).getTime(),
+    share_target_bits: jobRow.share_target_bits,
+  });
 
   const job = rowToJob(jobRow);
   const submit: ShareSubmitInput = {
@@ -151,12 +173,17 @@ export async function submitShare(
   };
 
   const result = verifyJobShare(job, row.dna, submit, new Set());
+  enrich({ share_bits: result.bits });
   if (!result.accepted) {
+    enrich({ reject_reason: result.error ?? "rejected" });
     return { ok: false, error: result.error ?? "rejected", bits: result.bits, hash: result.hash };
   }
 
   const dupCheck = await query(`SELECT 1 FROM submitted_shares WHERE hash = $1`, [result.hash]);
   if (dupCheck.rows.length > 0) {
+    //precheck means the share was already stored; pg_23505 below means two requests
+    //raced for the same hash. Only the second is a concurrency signal.
+    enrich({ reject_reason: "duplicate_share", dup_source: "precheck" });
     return { ok: false, error: "duplicate_share", hash: result.hash };
   }
 
@@ -216,6 +243,11 @@ export async function submitShare(
       );
 
       const updated = updateRes.rows[0]!;
+      enrich({
+        is_new_best: updateBest,
+        best_share_bits: updated.best_share_bits,
+        hash_delta: hashDelta,
+      });
       await audit(client, {
         playerId: row.owner_id,
         hashimonId: row.id,
@@ -227,6 +259,7 @@ export async function submitShare(
     });
   } catch (err: unknown) {
     if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505") {
+      enrich({ reject_reason: "duplicate_share", dup_source: "pg_23505" });
       return { ok: false, error: "duplicate_share", hash: result.hash };
     }
     throw err;

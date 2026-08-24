@@ -84,6 +84,7 @@ hashimonsRouter.get(
   asyncHandler(async (req, res) => {
     const row = await getForOwner(req.params.id!, req.player!.id);
     if (!row) { throw new AppError(404, "not found", "not_found"); }
+    enrich({ hashimon_id: row.id });
     const job = await issueJob(row);
     res.json(jobResponse(job, Number(row.extranonce2)));
   })
@@ -105,7 +106,9 @@ hashimonsRouter.post(
     if (!row) { throw new AppError(404, "not found", "not_found"); }
 
     const body = shareSchema.parse(req.body ?? {});
+    enrich({ hashimon_id: row.id, job_id: body.jobId });
     const outcome = await submitShare(row, body);
+    enrich({ accepted: outcome.ok });
 
     if (!outcome.ok) {
       const err = outcome.error;
@@ -119,6 +122,7 @@ hashimonsRouter.post(
     }
 
     const presented = present(outcome.row);
+    enrich({ tier: presented.tier, stars: presented.stars, stage: presented.stage });
     res.json({
       verified: true,
       accepted: true,

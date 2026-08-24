@@ -5,6 +5,8 @@
 import { config } from "@/config";
 import { doubleSha256Buffer } from "@/core/pow";
 import { decodeSegwitAddress, segwitScriptPubKeyHex } from "@/domain/bitcoin-address";
+import { logger } from "@/logger";
+import { elapsedMs } from "@/http/wide-event";
 
 export interface PreparedTemplate {
   templateId: string;
@@ -34,13 +36,37 @@ export async function getPreparedTemplate(now = Date.now()): Promise<PreparedTem
   if (cached && now - cached.fetchedAt < config.templateRefreshMs) {
     return cached;
   }
+  //Its own event, not a field on the request's: the fetch is shared across every
+  //creature mining right now, so charging its 5s timeout to whichever request
+  //happened to trigger it would blame a player at random. Never emitted on a cache
+  //hit — that would be one event per issueJob; the age travels in the request event
+  //as template_age_ms instead.
+  const startedAt = process.hrtime.bigint();
   try {
     const raw = await fetchRawTemplate();
     cached = prepareTemplate(raw, now);
+    logger.info({
+      event: "block_template_fetch",
+      outcome: "fetched",
+      host: safeHost(config.btcNodeUrl),
+      height: cached.height,
+      template_id: cached.templateId,
+      duration_ms: elapsedMs(startedAt),
+    });
     return cached;
   } catch (err: unknown) {
-    const host = safeHost(config.btcNodeUrl);
-    console.error("block-template: getPreparedTemplate failed", { host, message: (err as Error).message });
+    const staleAgeMs = cached ? now - cached.fetchedAt : null;
+    const exhausted = staleAgeMs !== null && staleAgeMs > MAX_STALE_MS;
+    logger.error({
+      event: "block_template_fetch",
+      outcome: "failed",
+      //safeHost, never the URL: config.btcNodeUrl carries user:pass@ inline.
+      host: safeHost(config.btcNodeUrl),
+      duration_ms: elapsedMs(startedAt),
+      served_stale: cached !== null && !exhausted,
+      stale_age_ms: staleAgeMs,
+      error: err,
+    });
     if (cached && now - cached.fetchedAt > MAX_STALE_MS) {
       // Serving an arbitrarily stale template isn't "degrading gracefully" anymore —
       // past this ceiling, mining against a long-superseded block is worse than no
