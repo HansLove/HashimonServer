@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { enrich } from "@/http/wide-event";
 
 //A thrown AppError becomes a clean JSON error with the right status. Anything
 //else becomes a 500 without leaking internals.
@@ -18,11 +19,15 @@ export function asyncHandler(
   };
 }
 
+//Enriches, never emits: the wide-event middleware is the single writer, so the
+//failure and the request it belongs to arrive as one line instead of two.
 export function errorMiddleware(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
   if (err instanceof AppError) {
+    enrich({ error_code: err.code, error_message: err.message });
     res.status(err.status).json({ error: err.message, code: err.code });
     return;
   }
-  console.error("unhandled error:", err);
+  //The key must be `error` for pino's stdSerializers.err to unpack the stack.
+  enrich({ error_code: "internal", error: err });
   res.status(500).json({ error: "internal error", code: "internal" });
 }

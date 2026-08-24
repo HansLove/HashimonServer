@@ -15,7 +15,7 @@
     "start": "node dist/server.js",
     "migrate": "node dist/db/migrate.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts src/domain/block-template.test.ts src/domain/bitcoin-address.test.ts"
+    "test": "node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts src/domain/block-template.test.ts src/domain/bitcoin-address.test.ts src/http/wide-event.test.ts"
   },
   "dependencies": {
     "@noble/secp256k1": "2.2.3",

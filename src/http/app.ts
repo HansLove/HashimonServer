@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import type { Logger } from "pino";
 import { config } from "@/config";
 import { healthRouter } from "@/http/routes/health";
 import { sessionRouter } from "@/http/routes/session";
@@ -9,9 +10,13 @@ import { authRouter } from "@/http/routes/auth";
 import { internalRouter } from "@/http/routes/internal";
 import { walletRouter } from "@/http/routes/wallet";
 import { errorMiddleware } from "@/http/errors";
+import { wideEventMiddleware } from "@/http/wide-event";
 
-export function createApp() {
+export function createApp(logger?: Logger) {
   const app = express();
+  //First in the chain: everything after it — CORS rejections, body parse failures,
+  //404s — happens inside the event's store and lands in the event.
+  app.use(wideEventMiddleware(logger));
   app.use(
     cors({
       origin: config.corsOrigin,
