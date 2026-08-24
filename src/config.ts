@@ -35,6 +35,9 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL ?? "postgres://localhost:5432/hashimon",
   sessionTtlHours: Number(process.env.SESSION_TTL_HOURS ?? 720),
   algoVersion: process.env.ALGO_VERSION ?? "caos-core@1",
+  // Stamped on every log event so a failure can be traced back to the deploy that
+  // shipped it. The image has no .git, so the Dockerfile bakes it in as a build arg.
+  commitSha: process.env.COMMIT_SHA ?? "dev",
   shareTargetBits: Number(process.env.HASHIMON_SHARE_TARGET_BITS ?? 20),
   jobTtlMs: Number(process.env.HASHIMON_JOB_TTL_MS ?? 900_000),
   blockTargetBits: Number(process.env.HASHIMON_BLOCK_TARGET_BITS ?? 64),

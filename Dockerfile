@@ -23,6 +23,11 @@ RUN pnpm build
 
 FROM base AS runner
 ENV NODE_ENV=production
+# Stamped into every log event so a failure traces back to the deploy that shipped
+# it. The image carries no .git, so the sha has to be passed in at build time:
+#   docker build --build-arg COMMIT_SHA=$(git rev-parse --short HEAD) .
+ARG COMMIT_SHA=dev
+ENV COMMIT_SHA=${COMMIT_SHA}
 WORKDIR /app
 USER node
 COPY --from=prod-deps /app/node_modules ./node_modules
