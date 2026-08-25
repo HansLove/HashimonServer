@@ -2,7 +2,15 @@
 //block-template.ts can pay the coinbase to a real address instead of an OP_RETURN
 //placeholder. Only segwit (bc1.../tb1.../bcrt1...) is supported — legacy base58
 //addresses (1.../3...) are out of scope until an operator needs one.
-import { bech32, bech32m } from "bech32";
+import { createRequire } from "node:module";
+
+// bech32@2 exports { bech32, bech32m } as CJS; Node may hoist an older flat bech32@1
+// from a parent node_modules and break ESM named imports — require() from this package root.
+const require = createRequire(import.meta.url);
+const { bech32, bech32m } = require("bech32") as typeof import("bech32");
+if (!bech32?.decode || !bech32m?.decode) {
+  throw new Error("bech32@2.0.0 required (bech32 + bech32m); run `pnpm install` in api/");
+}
 
 export interface SegwitScriptPubKey {
   version: number;
