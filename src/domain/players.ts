@@ -10,7 +10,7 @@ import {
   generateSecp256k1Keypair,
   isValidCompressedPublicKey,
   isValidLuantiUsername,
-  luantiPasswordHash,
+  luantiSrpEntry,
   type Custody,
 } from "@/domain/crypto";
 import { emit, isGenesisSpecies, present, type HashimonRow } from "@/domain/hashimons";
@@ -175,7 +175,7 @@ export async function registerOwner(input: {
   const hashStartedAt = process.hrtime.bigint();
   const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
   enrich({ custody, argon2_ms: elapsedMs(hashStartedAt) });
-  const luantiPassword = luantiPasswordHash(username, input.password);
+  const luantiPassword = luantiSrpEntry(username, input.password);
 
   let player: Player;
   try {
