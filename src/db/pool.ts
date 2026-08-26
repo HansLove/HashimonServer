@@ -44,3 +44,9 @@ export async function withTransaction<T>(fn: (client: DbClient) => Promise<T>): 
     client.release();
   }
 }
+
+/** pg unique_violation (23505), optionally narrowed to one constraint/index name. */
+export function isUniqueViolation(err: unknown, constraint?: string): boolean {
+  if (!err || typeof err !== "object" || (err as { code?: string }).code !== "23505") { return false; }
+  return constraint === undefined || (err as { constraint?: string }).constraint === constraint;
+}

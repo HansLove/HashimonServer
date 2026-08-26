@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { ZodError } from "zod";
 import { enrich } from "@/http/wide-event";
 
 //A thrown AppError becomes a clean JSON error with the right status. Anything
@@ -25,6 +26,11 @@ export function errorMiddleware(err: unknown, _req: Request, res: Response, _nex
   if (err instanceof AppError) {
     enrich({ error_code: err.code, error_message: err.message });
     res.status(err.status).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof ZodError) {
+    enrich({ error_code: "bad_request", error_message: err.message });
+    res.status(400).json({ error: "invalid request body", code: "bad_request", issues: err.issues });
     return;
   }
   //The key must be `error` for pino's stdSerializers.err to unpack the stack.

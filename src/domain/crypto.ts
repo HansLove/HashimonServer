@@ -74,8 +74,16 @@ export function luantiSrpEntry(name: string, password: string): string {
 
 export const LUANTI_SRP_ENTRY_RE = /^#1#([A-Za-z0-9+/]+={0,2})#([A-Za-z0-9+/]+={0,2})$/;
 
+/** Shape plus content: canonical base64, a 16-byte salt, a non-zero verifier inside the 2048-bit group. */
 export function isLuantiSrpEntry(entry: string): boolean {
-  return LUANTI_SRP_ENTRY_RE.test(entry);
+  const parsed = LUANTI_SRP_ENTRY_RE.exec(entry);
+  if (!parsed) { return false; }
+  const saltB64 = parsed[1]!;
+  const verifierB64 = parsed[2]!;
+  const salt = Buffer.from(saltB64, "base64");
+  const verifier = Buffer.from(verifierB64, "base64");
+  if (salt.toString("base64") !== saltB64 || verifier.toString("base64") !== verifierB64) { return false; }
+  return salt.length === 16 && verifier.length > 0 && verifier.length <= 256 && verifier.some((b) => b !== 0);
 }
 
 /** Recompute the verifier with the entry's own salt and compare. */

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { query, withTransaction } from "@/db/pool";
+import { isUniqueViolation, query, withTransaction } from "@/db/pool";
 import { audit } from "@/domain/audit";
 import { Dna, progressionOf, verifyStoredPow, type PowRecord, type BitcoinShareSnapshot, CORE_VERSION } from "@/core/index";
 import { Hashimons } from "@/data/species";
@@ -138,7 +138,7 @@ export async function emit(input: {
       });
     } catch (err: unknown) {
       // 23505 = unique_violation on dna. Extremely unlikely; retry a new nonce.
-      if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505") {
+      if (isUniqueViolation(err)) {
         continue;
       }
       throw err;

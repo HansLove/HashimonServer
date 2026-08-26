@@ -1,4 +1,4 @@
-import { query, withTransaction, type DbClient } from "@/db/pool";
+import { isUniqueViolation, query, withTransaction, type DbClient } from "@/db/pool";
 import { audit } from "@/domain/audit";
 import { config } from "@/config";
 import {
@@ -264,7 +264,7 @@ export async function submitShare(
     });
     return outcome;
   } catch (err: unknown) {
-    if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505") {
+    if (isUniqueViolation(err)) {
       enrich({ reject_reason: "duplicate_share", dup_source: "pg_23505" });
       return { ok: false, error: "duplicate_share", hash: result.hash };
     }

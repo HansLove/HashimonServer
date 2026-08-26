@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import argon2 from "argon2";
-import { query } from "@/db/pool";
+import { isUniqueViolation, query } from "@/db/pool";
 import { config } from "@/config";
 import { AppError } from "@/http/errors";
 import { elapsedMs, enrich } from "@/http/wide-event";
@@ -200,11 +200,10 @@ export async function registerOwner(input: {
     );
     player = inserted.rows[0]!;
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("players_username_lower_idx")) {
+    if (isUniqueViolation(err, "players_username_lower_idx")) {
       throw new AppError(409, "username already registered", "username_taken");
     }
-    if (msg.includes("public_key")) {
+    if (isUniqueViolation(err, "players_public_key_key")) {
       throw new AppError(409, "publicKey already registered", "public_key_taken");
     }
     throw err;
@@ -315,8 +314,7 @@ export async function registerLuantiGuest(name: string, passwordEntry: string): 
   } catch (err: unknown) {
     // No pre-SELECT: the unique index is what makes the check race-free against two
     // worlds registering the same name in the same tick.
-    const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("players_username_lower_idx")) {
+    if (isUniqueViolation(err, "players_username_lower_idx")) {
       throw new AppError(409, "username already registered", "username_taken");
     }
     throw err;
