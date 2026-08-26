@@ -49,6 +49,17 @@ describe("crypto / ownership helpers", () => {
     assert.equal(luantiSrpVerify("Hans", "secret123", "#1#onlysalt"), false);
   });
 
+  it("accepts the unpadded base64 the engine actually emits (util/base64.cpp skips padding)", () => {
+    const unpadded = ENGINE_VECTOR.replace(/=+/g, "");
+    assert.equal(isLuantiSrpEntry(unpadded), true);
+    assert.equal(luantiSrpVerify("Hans", "secret123", unpadded), true);
+  });
+
+  it("generates entries in the engine's unpadded format", () => {
+    const entry = luantiSrpEntry("Hans", "secret123");
+    assert.equal(entry.includes("="), false);
+  });
+
   it("generates and round-trips encrypted private keys", async () => {
     const kp = generateSecp256k1Keypair();
     assert.equal(isValidCompressedPublicKey(kp.publicKeyHex), true);

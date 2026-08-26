@@ -66,23 +66,25 @@ function srpVerifier(name: string, password: string, salt: Buffer): Buffer {
   return toMinimalBytes(modPow(SRP_G, x, SRP_N_2048));
 }
 
+/** Luanti's engine never pads its base64 (util/base64.cpp skips the padding loop); match that format. */
+function toUnpaddedBase64(buf: Buffer): string {
+  return buf.toString("base64").replace(/=+$/, "");
+}
+
 /** Luanti's DB-ready SRP entry for this name/password, with a fresh 16-byte salt. */
 export function luantiSrpEntry(name: string, password: string): string {
   const salt = randomBytes(16);
-  return `#1#${salt.toString("base64")}#${srpVerifier(name, password, salt).toString("base64")}`;
+  return `#1#${toUnpaddedBase64(salt)}#${toUnpaddedBase64(srpVerifier(name, password, salt))}`;
 }
 
 export const LUANTI_SRP_ENTRY_RE = /^#1#([A-Za-z0-9+/]+={0,2})#([A-Za-z0-9+/]+={0,2})$/;
 
-/** Shape plus content: canonical base64, a 16-byte salt, a non-zero verifier inside the 2048-bit group. */
+/** Shape plus content: a 16-byte salt and a non-zero verifier inside the 2048-bit group. Padding is optional — Luanti never emits it. */
 export function isLuantiSrpEntry(entry: string): boolean {
   const parsed = LUANTI_SRP_ENTRY_RE.exec(entry);
   if (!parsed) { return false; }
-  const saltB64 = parsed[1]!;
-  const verifierB64 = parsed[2]!;
-  const salt = Buffer.from(saltB64, "base64");
-  const verifier = Buffer.from(verifierB64, "base64");
-  if (salt.toString("base64") !== saltB64 || verifier.toString("base64") !== verifierB64) { return false; }
+  const salt = Buffer.from(parsed[1]!, "base64");
+  const verifier = Buffer.from(parsed[2]!, "base64");
   return salt.length === 16 && verifier.length > 0 && verifier.length <= 256 && verifier.some((b) => b !== 0);
 }
 
