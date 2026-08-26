@@ -25,7 +25,7 @@ authRouter.post(
       key_source: input.publicKey ? "client" : "generated",
     });
     const result = await registerOwner(input);
-    res.status(201).json({
+    res.status(result.claimed ? 200 : 201).json({
       token: result.session.token,
       expiresAt: result.session.expires_at,
       player: presentPlayer(result.player),

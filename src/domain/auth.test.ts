@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   encryptPrivateKey,
@@ -10,7 +10,13 @@ import {
   luantiSrpEntry,
   luantiSrpVerify,
 } from "@/domain/crypto";
-import { canOwn } from "@/domain/players";
+import { canOwn, loginOwner, registerLuantiGuest, registerOwner } from "@/domain/players";
+import { pool, query } from "@/db/pool";
+import { AppError } from "@/http/errors";
+
+function rejectsWithCode(code: string) {
+  return (err: unknown) => err instanceof AppError && err.code === code;
+}
 
 describe("crypto / ownership helpers", () => {
   it("validates Luanti usernames", () => {
@@ -71,5 +77,71 @@ describe("crypto / ownership helpers", () => {
   it("canOwn requires public_key", () => {
     assert.equal(canOwn({ public_key: null }), false);
     assert.equal(canOwn({ public_key: "02ab" }), true);
+  });
+});
+
+describe("Luanti guest login and claim (against the local DB)", () => {
+  const testUsernames: string[] = [];
+
+  function uniqueUsername(prefix: string): string {
+    const suffix = process.hrtime.bigint().toString(36);
+    const name = `${prefix}${suffix}`.slice(0, 20);
+    testUsernames.push(name);
+    return name;
+  }
+
+  after(async () => {
+    if (testUsernames.length > 0) {
+      await query(`DELETE FROM players WHERE username = ANY($1)`, [testUsernames]);
+    }
+    await pool.end();
+  });
+
+  it("logs a Luanti-only guest in against its SRP entry, with the wrong password rejected", async () => {
+    const username = uniqueUsername("srpguest");
+    await registerLuantiGuest(username, luantiSrpEntry(username, "correct-horse-1"));
+
+    const result = await loginOwner(username, "correct-horse-1");
+    assert.equal(result.player.username, username);
+    assert.equal(canOwn(result.player), false);
+
+    await assert.rejects(loginOwner(username, "wrong-password"), rejectsWithCode("invalid_credentials"));
+  });
+
+  it("claims a Luanti-only guest through registerOwner, keeping the same luanti_password", async () => {
+    const username = uniqueUsername("claimguest");
+    const luantiPassword = luantiSrpEntry(username, "correct-horse-2");
+    const guest = await registerLuantiGuest(username, luantiPassword);
+
+    const claimed = await registerOwner({
+      username,
+      password: "correct-horse-2",
+      speciesKey: "genesis_fuego",
+    });
+    assert.equal(claimed.claimed, true);
+    assert.equal(canOwn(claimed.player), true);
+    assert.equal(claimed.hashimon !== undefined, true);
+
+    const row = await query<{ luanti_password: string }>(
+      `SELECT luanti_password FROM players WHERE id = $1`,
+      [guest.id]
+    );
+    assert.equal(row.rows[0]?.luanti_password, luantiPassword);
+
+    // Now claimed: the same endpoint refuses to claim it a second time.
+    await assert.rejects(
+      registerOwner({ username, password: "correct-horse-2", speciesKey: "genesis_fuego" }),
+      rejectsWithCode("username_taken")
+    );
+  });
+
+  it("refuses to claim a Luanti-only guest with the wrong password", async () => {
+    const username = uniqueUsername("badclaim");
+    await registerLuantiGuest(username, luantiSrpEntry(username, "correct-horse-3"));
+
+    await assert.rejects(
+      registerOwner({ username, password: "totally-wrong-pw", speciesKey: "genesis_fuego" }),
+      rejectsWithCode("username_taken")
+    );
   });
 });

@@ -93,8 +93,8 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/health` | – | liveness + DB round-trip |
-| POST | `/register` | – | **owner signup** → token + genesis Hashimon + publicKey |
-| POST | `/login` | – | username/password → token (+ encrypted privkey blob if custody B) |
+| POST | `/register` | – | **owner signup** → token + genesis Hashimon + publicKey (200 if claiming a Luanti guest, 201 if new) |
+| POST | `/login` | – | username/password → token (+ encrypted privkey blob if custody B); Luanti-only guests log in against their Luanti password |
 | POST | `/session` | – | anonymous / publicKey restore (2D/dev; no ownership) |
 | GET | `/profile` | ✓ | account state (`canOwn`, custody, counts) |
 | GET | `/hashimons` | ✓ | inventory |
@@ -126,6 +126,13 @@ Response includes `{ token, player, publicKey, custody, hashimon }`. Never retur
 
 Use the **same username and password** on the Luanti join screen (IP/port of Hashiworld).
 
+If `username` belongs to an existing Luanti-only guest (no `password_hash`, no
+`publicKey` yet) and `password` matches that account's Luanti password, this is a
+**claim**, not a signup: the existing row gets a keypair/custody and its starter, status
+is **200** instead of 201, and `luanti_password` is left untouched. A wrong password or a
+username that already has a `password_hash`/`publicKey` both fail as 409
+`username_taken` — the response never reveals which.
+
 ### Luanti bridge
 
 **The `players` table is the only password store.** Both signup surfaces — web
@@ -149,8 +156,9 @@ bridge is silently off.
   `username` + `luanti_password`, no `password_hash`, no key, `canOwn: false`.
 - **Changing a password in-game is refused** (`/setpassword`); the web is the only place
   a password changes. `auth.sqlite` still owns privileges and `last_login`.
-- No claiming: `/register` on the web with a name that already exists — guest or owner —
-  is 409 `username_taken`. A Luanti guest who wants to own registers under another name.
+- A Luanti guest who wants to own registers under the **same** username and password on
+  `/register` — see the claim paragraph above. A collision with an already-owned name, or
+  the wrong password for a guest, is 409 `username_taken` either way.
 
 Owners created before this change still carry the legacy `base64(SHA1(name+password))`
 entry until they register again; the engine accepts those through its legacy password
@@ -213,7 +221,7 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
 - `tsc --noEmit` — clean.
 - Core + auth helper tests (`pnpm test`) — SHA-256 / DNA / PoW parity plus username, Luanti SRP entry (against a vector the engine's own `core.check_password_entry` accepted), key encrypt round-trip, `canOwn`.
 - Owner smoke: `/register` → `/internal/luanti-auth` → `/internal/luanti-bind`; anonymous `POST /hashimons` → 403 `cannot_own`.
-- Guest smoke: `/internal/luanti-register` → 201, same name in another casing → 409, non-SRP password → 422, then `/register` on that name → 409.
+- Guest smoke: `/internal/luanti-register` → 201, same name in another casing → 409, non-SRP password → 422, then `/login` on that name with the right password → 200, wrong password → 401, then `/register` with the right password → 200 (claimed) and `canOwn: true`.
 
 ## Next phases (not built yet)
 

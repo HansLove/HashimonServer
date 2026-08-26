@@ -91,8 +91,15 @@ relays what the engine built for an in-game signup — the plaintext never leave
 client). The world polls `GET /internal/luanti-auth` every ~2s for **every** named
 account plus `can_own`, answers the engine's `get_auth` from that mirror, and calls
 `POST /internal/luanti-bind` on join for owners. Changing a password in-game is refused;
-the web is the only place it changes. A name already taken — guest or owner — is 409 on
-`/register`; there is no claim flow.
+the web is the only place it changes. A Luanti-only guest (no `password_hash`, no
+`public_key`) can log in on the web with that same Luanti password
+(`domain/crypto.ts::luantiSrpVerify` recomputes the SRP verifier, no separate hash is
+stored) and can claim ownership through the same `POST /register` — same username,
+same password, a conditional `UPDATE` (same race-closing pattern as
+`domain/players.ts::claimSelfCustody`) instead of an `INSERT` — which mints a keypair, custody and a starter over the existing row without
+touching `luanti_password`. `/register` returns 200 on a claim, 201 on a fresh
+registration; any other name collision (wrong password, or a row that already has a
+`password_hash`/`public_key`) is still 409 `username_taken`.
 
 **Logging is one wide event per request.** `src/http/wide-event.ts` holds an
 `AsyncLocalStorage<WideEvent>`; `wideEventMiddleware` (mounted first in `http/app.ts`) is

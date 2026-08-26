@@ -12,6 +12,7 @@ import {
   isLuantiSrpEntry,
   isValidLuantiUsername,
   luantiSrpEntry,
+  luantiSrpVerify,
   type Custody,
 } from "@/domain/crypto";
 import { emit, isGenesisSpecies, present, type HashimonRow } from "@/domain/hashimons";
@@ -121,6 +122,7 @@ export async function registerOwner(input: {
   session: Session;
   hashimon: ReturnType<typeof present>;
   created: true;
+  claimed: boolean;
 }> {
   const username = input.username.trim();
   if (!isValidLuantiUsername(username)) {
@@ -135,47 +137,21 @@ export async function registerOwner(input: {
 
   const existing = await getPlayerByUsername(username);
   if (existing) {
-    throw new AppError(409, "username already registered", "username_taken");
-  }
-
-  if (input.custody === "player" && !input.publicKey) {
-    throw new AppError(422, "custody player requires publicKey", "invalid_custody");
-  }
-  if (input.custody === "server_encrypted" && input.publicKey) {
-    throw new AppError(422, "custody server_encrypted is incompatible with a supplied publicKey", "invalid_custody");
-  }
-
-  let publicKey: string;
-  let custody: Custody;
-  let encPrivateKey: Buffer | null = null;
-  let kdfSalt: string | null = null;
-  let kdfParams: Record<string, unknown> | null = null;
-
-  if (input.publicKey) {
-    if (!isValidCompressedPublicKey(input.publicKey)) {
-      throw new AppError(422, "invalid compressed secp256k1 publicKey", "invalid_public_key");
+    // A Luanti-only guest (no password_hash, no public_key) is reclaimable from this
+    // same endpoint if the caller proves they know the account's password.
+    if (existing.password_hash || existing.public_key) {
+      throw new AppError(409, "username already registered", "username_taken");
     }
-    const keyTaken = await query(`SELECT 1 FROM players WHERE public_key = $1`, [input.publicKey]);
-    if (keyTaken.rows[0]) {
-      throw new AppError(409, "publicKey already registered", "public_key_taken");
-    }
-    publicKey = input.publicKey.toLowerCase();
-    custody = "player";
-  } else {
-    const kp = generateSecp256k1Keypair();
-    const enc = await encryptPrivateKey(kp.privateKeyHex, input.password);
-    publicKey = kp.publicKeyHex;
-    custody = "server_encrypted";
-    encPrivateKey = enc.ciphertext;
-    kdfSalt = enc.kdfSalt;
-    kdfParams = enc.kdfParams;
+    return claimLuantiGuest(existing, input);
   }
+
+  const keyMaterial = await deriveOwnerKeyMaterial(input);
 
   //argon2 is deliberately slow, so it dominates this route's duration_ms. Reported
   //as its own field, otherwise every registration reads like a latency anomaly.
   const hashStartedAt = process.hrtime.bigint();
   const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
-  enrich({ custody, argon2_ms: elapsedMs(hashStartedAt) });
+  enrich({ custody: keyMaterial.custody, argon2_ms: elapsedMs(hashStartedAt) });
   const luantiPassword = luantiSrpEntry(username, input.password);
 
   let player: Player;
@@ -190,12 +166,12 @@ export async function registerOwner(input: {
         username,
         passwordHash,
         luantiPassword,
-        publicKey,
+        keyMaterial.publicKey,
         username,
-        encPrivateKey,
-        kdfSalt,
-        kdfParams ? JSON.stringify(kdfParams) : null,
-        custody,
+        keyMaterial.encPrivateKey,
+        keyMaterial.kdfSalt,
+        keyMaterial.kdfParams ? JSON.stringify(keyMaterial.kdfParams) : null,
+        keyMaterial.custody,
       ]
     );
     player = inserted.rows[0]!;
@@ -209,27 +185,154 @@ export async function registerOwner(input: {
     throw err;
   }
 
+  const { session, hashimon } = await emitStarterAndBindSession(player, input.speciesKey, () =>
+    query(`DELETE FROM players WHERE id = $1`, [player.id])
+  );
+  return { player, session, hashimon, created: true, claimed: false };
+}
+
+/** Give a Luanti-only guest row (no password_hash, no public_key) what registerOwner
+ *  would have given a brand-new account — keypair/custody and a starter — without
+ *  touching luanti_password: it's the same password, already verified against the
+ *  SRP entry the engine built for it in-game. */
+async function claimLuantiGuest(
+  existing: Player,
+  input: { password: string; speciesKey: string; publicKey?: string; custody?: Custody }
+): Promise<{
+  player: Player;
+  session: Session;
+  hashimon: ReturnType<typeof present>;
+  created: true;
+  claimed: true;
+}> {
+  if (!existing.luanti_password || !luantiSrpVerify(existing.username!, input.password, existing.luanti_password)) {
+    // Same 409 as a genuinely taken username: a wrong password here must not reveal
+    // that the account exists and is claimable.
+    throw new AppError(409, "username already registered", "username_taken");
+  }
+
+  const keyMaterial = await deriveOwnerKeyMaterial(input);
+
+  const hashStartedAt = process.hrtime.bigint();
+  const passwordHash = await argon2.hash(input.password, { type: argon2.argon2id });
+  enrich({ custody: keyMaterial.custody, argon2_ms: elapsedMs(hashStartedAt) });
+
+  let player: Player;
+  try {
+    const claimedRow = await query<Player>(
+      `UPDATE players
+          SET password_hash = $2, public_key = $3, enc_private_key = $4,
+              kdf_salt = $5, kdf_params = $6::jsonb, custody = $7
+        WHERE id = $1 AND password_hash IS NULL AND public_key IS NULL
+        RETURNING *`,
+      [
+        existing.id,
+        passwordHash,
+        keyMaterial.publicKey,
+        keyMaterial.encPrivateKey,
+        keyMaterial.kdfSalt,
+        keyMaterial.kdfParams ? JSON.stringify(keyMaterial.kdfParams) : null,
+        keyMaterial.custody,
+      ]
+    );
+    const row = claimedRow.rows[0];
+    if (!row) {
+      // Lost the race against a concurrent claim on the same row.
+      throw new AppError(409, "username already registered", "username_taken");
+    }
+    player = row;
+  } catch (err: unknown) {
+    if (err instanceof AppError) { throw err; }
+    if (isUniqueViolation(err, "players_public_key_key")) {
+      throw new AppError(409, "publicKey already registered", "public_key_taken");
+    }
+    throw err;
+  }
+
+  const { session, hashimon } = await emitStarterAndBindSession(player, input.speciesKey, () =>
+    query(
+      `UPDATE players
+          SET password_hash = NULL, public_key = NULL, enc_private_key = NULL,
+              kdf_salt = NULL, kdf_params = NULL, custody = NULL
+        WHERE id = $1`,
+      [player.id]
+    )
+  );
+  return { player, session, hashimon, created: true, claimed: true };
+}
+
+/** Validates + derives the keypair/custody/encrypted-blob triad shared by a fresh
+ *  registration and a claim — the only difference between them is what SQL persists
+ *  the result. */
+async function deriveOwnerKeyMaterial(input: {
+  password: string;
+  publicKey?: string;
+  custody?: Custody;
+}): Promise<{
+  publicKey: string;
+  custody: Custody;
+  encPrivateKey: Buffer | null;
+  kdfSalt: string | null;
+  kdfParams: Record<string, unknown> | null;
+}> {
+  if (input.custody === "player" && !input.publicKey) {
+    throw new AppError(422, "custody player requires publicKey", "invalid_custody");
+  }
+  if (input.custody === "server_encrypted" && input.publicKey) {
+    throw new AppError(422, "custody server_encrypted is incompatible with a supplied publicKey", "invalid_custody");
+  }
+
+  if (input.publicKey) {
+    if (!isValidCompressedPublicKey(input.publicKey)) {
+      throw new AppError(422, "invalid compressed secp256k1 publicKey", "invalid_public_key");
+    }
+    const keyTaken = await query(`SELECT 1 FROM players WHERE public_key = $1`, [input.publicKey]);
+    if (keyTaken.rows[0]) {
+      throw new AppError(409, "publicKey already registered", "public_key_taken");
+    }
+    return {
+      publicKey: input.publicKey.toLowerCase(),
+      custody: "player",
+      encPrivateKey: null,
+      kdfSalt: null,
+      kdfParams: null,
+    };
+  }
+
+  const kp = generateSecp256k1Keypair();
+  const enc = await encryptPrivateKey(kp.privateKeyHex, input.password);
+  return {
+    publicKey: kp.publicKeyHex,
+    custody: "server_encrypted",
+    encPrivateKey: enc.ciphertext,
+    kdfSalt: enc.kdfSalt,
+    kdfParams: enc.kdfParams,
+  };
+}
+
+/** Emits the genesis starter and mints the session that both a fresh registration
+ *  and a successful claim end with. `compensate` undoes whatever the caller just
+ *  persisted if this fails partway — a DELETE for a brand-new row, a revert-to-NULL
+ *  for a claimed one (deleting it would destroy a pre-existing Luanti account). */
+async function emitStarterAndBindSession(
+  player: Player,
+  speciesKey: string,
+  compensate: () => Promise<unknown>
+): Promise<{ session: Session; hashimon: ReturnType<typeof present> }> {
   try {
     const row: HashimonRow = await emit({
       ownerId: player.id,
-      speciesKey: input.speciesKey,
+      speciesKey,
       provenance: "starter",
     });
     const session = await createSession(player.id);
     enrich({ player_id: player.id, starter_emitted: true });
-    return {
-      player,
-      session,
-      hashimon: present(row),
-      created: true,
-    };
+    return { session, hashimon: present(row) };
   } catch (err) {
-    // emit()/createSession() failed after the player row already committed — the
-    // INSERT above is not part of that transaction (emit owns its own), so without
-    // this the username would be permanently orphaned (registered but unusable).
-    // ponytail: best-effort compensating delete, not a real distributed transaction —
-    // revisit if emit() ever accepts an external client to share one transaction.
-    await query(`DELETE FROM players WHERE id = $1`, [player.id]).catch(() => {});
+    // emit()/createSession() failed after the row above already committed — neither
+    // is part of that transaction (emit owns its own), so without this the account
+    // would be left in a half-registered state.
+    await compensate().catch(() => {});
     throw err;
   }
 }
@@ -245,13 +348,20 @@ export async function loginOwner(username: string, password: string): Promise<{
   //account existence. The event does not have to: operationally, a spike of
   //bad_password on existing accounts and a spike of no_user are different incidents.
   const player = await getPlayerByUsername(username.trim());
-  if (!player || !player.password_hash) {
+  if (!player || (!player.password_hash && !player.luanti_password)) {
     enrich({ login_result: "no_user" });
     throw new AppError(401, "invalid username or password", "invalid_credentials");
   }
-  const verifyStartedAt = process.hrtime.bigint();
-  const ok = await argon2.verify(player.password_hash, password);
-  enrich({ argon2_ms: elapsedMs(verifyStartedAt) });
+
+  let ok: boolean;
+  if (player.password_hash) {
+    const verifyStartedAt = process.hrtime.bigint();
+    ok = await argon2.verify(player.password_hash, password);
+    enrich({ argon2_ms: elapsedMs(verifyStartedAt), login_source: "argon2" });
+  } else {
+    ok = luantiSrpVerify(player.username!, password, player.luanti_password!);
+    enrich({ login_source: "srp" });
+  }
   if (!ok) {
     enrich({ login_result: "bad_password", player_id: player.id });
     throw new AppError(401, "invalid username or password", "invalid_credentials");
