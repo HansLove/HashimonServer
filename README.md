@@ -101,7 +101,8 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | GET | `/hashimons/:id` | ✓ | one owned creature |
 | POST | `/hashimons` | ✓ | emission — **403 `cannot_own` without public_key** |
 | POST | `/wallet/claim-self-custody` | ✓ | drop server-held enc private key |
-| GET | `/internal/luanti-auth` | secret | owner list `{name, password}` for Luanti poll |
+| GET | `/internal/luanti-auth` | secret | account list `{name, password, can_own}` for Luanti poll |
+| POST | `/internal/luanti-register` | secret | `{name, password}` → 201 guest row (in-game signup) |
 | POST | `/internal/luanti-bind` | secret | `{name}` → bearer session (owners only) |
 
 ### `POST /register` (Lovable contract)
@@ -127,9 +128,33 @@ Use the **same username and password** on the Luanti join screen (IP/port of Has
 
 ### Luanti bridge
 
-Set `LUANTI_SERVER_SECRET` in API `.env` and the same value as `hashimon_server_secret` in `minetest.conf`. The world polls `/internal/luanti-auth` every ~2s and, on join for cached owners, calls `/internal/luanti-bind` (no password forwarded — the engine already verified the API-published hash).
+**The `players` table is the only password store.** Both signup surfaces — web
+`/register` and the Luanti join screen — end with one row in `players`, and
+`luanti_password` holds an SRP entry the engine can authenticate against directly:
+`#1#<b64 salt>#<b64 verifier>`, exactly what `encode_srp_verifier` writes into
+`auth.sqlite` (`luanti/src/util/auth.cpp`). The verifier is derived from the
+**lowercased** name, so the casing a player types on the join screen can no longer
+diverge from the casing stored here.
 
-If a guest name is later registered on the web, **the API password wins** on the next poll.
+Set `LUANTI_SERVER_SECRET` in API `.env` and the same value as `hashimon_server_secret`
+in `minetest.conf` — without it the mod treats every player as a local guest and the
+bridge is silently off.
+
+- The world polls `GET /internal/luanti-auth` every ~2s for **every** named account, not
+  just owners, and answers the engine's `get_auth` from that mirror. `can_own` (not mere
+  presence in the list) is what marks a player as an owner.
+- A player who registers from the Luanti client is pushed to `POST
+  /internal/luanti-register` with the entry the engine just built — the engine never
+  reveals the plaintext, so this is the only hook available. The row is a guest:
+  `username` + `luanti_password`, no `password_hash`, no key, `canOwn: false`.
+- **Changing a password in-game is refused** (`/setpassword`); the web is the only place
+  a password changes. `auth.sqlite` still owns privileges and `last_login`.
+- No claiming: `/register` on the web with a name that already exists — guest or owner —
+  is 409 `username_taken`. A Luanti guest who wants to own registers under another name.
+
+Owners created before this change still carry the legacy `base64(SHA1(name+password))`
+entry until they register again; the engine accepts those through its legacy password
+mechanism, but nothing writes that format any more.
 
 ### Quick manual check (owner)
 
@@ -137,6 +162,15 @@ If a guest name is later registered on the web, **the API password wins** on the
 curl -s -X POST localhost:4000/register -H 'content-type: application/json' \
   -d '{"username":"Hans","password":"password123","speciesKey":"genesis_fuego"}' | jq
 curl -s localhost:4000/internal/luanti-auth -H "X-Luanti-Secret: $LUANTI_SERVER_SECRET" | jq
+```
+
+### Quick manual check (in-game signup)
+
+```bash
+ENTRY='#1#CWvgWHs19Sugq+uNeEFcKQ==#MVCq88fj…'   # what the engine hands the mod
+curl -s -X POST localhost:4000/internal/luanti-register \
+  -H "X-Luanti-Secret: $LUANTI_SERVER_SECRET" -H 'content-type: application/json' \
+  -d "{\"name\":\"Hans\",\"password\":\"$ENTRY\"}" | jq
 ```
 
 ## Logging — one wide event per request
@@ -177,8 +211,9 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
 ## Verified so far
 
 - `tsc --noEmit` — clean.
-- Core + auth helper tests (`pnpm test`) — SHA-256 / DNA / PoW parity plus username, Luanti hash, key encrypt round-trip, `canOwn`.
+- Core + auth helper tests (`pnpm test`) — SHA-256 / DNA / PoW parity plus username, Luanti SRP entry (against a vector the engine's own `core.check_password_entry` accepted), key encrypt round-trip, `canOwn`.
 - Owner smoke: `/register` → `/internal/luanti-auth` → `/internal/luanti-bind`; anonymous `POST /hashimons` → 403 `cannot_own`.
+- Guest smoke: `/internal/luanti-register` → 201, same name in another casing → 409, non-SRP password → 422, then `/register` on that name → 409.
 
 ## Next phases (not built yet)
 

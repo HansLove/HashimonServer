@@ -16,12 +16,14 @@ from the client and re-derives or re-verifies rather than storing decided values
 - `block-template::getPreparedTemplate` — cached, creature-agnostic Bitcoin block template feeding real-target jobs.
 
 ## Key Files
-- **crypto.ts** — secp256k1 keygen/validation, scrypt+AES-GCM private-key encryption, and the legacy Luanti SHA1 password format (three unrelated crypto concerns, kept together because `players.ts` needs all three).
+- **crypto.ts** — secp256k1 keygen/validation, scrypt+AES-GCM private-key encryption, and Luanti SRP-6a password entries (three unrelated crypto concerns, kept together because `players.ts` needs all three).
 - **audit.ts** — append-only log writer; must be called with the same transaction `client` as the mutation it records (see Side Effects).
 - **block-template.ts** — talks to a real Bitcoin Core node (`getblocktemplate` RPC) and reduces its response to a compact, extranonce-hole-shaped coinbase + merkle branch; not a mining job itself, `mining.ts` splices per-share extranonce values into it.
 - **bitcoin-address.ts** — decodes a bech32/bech32m segwit address (BIP173/BIP350) into a scriptPubKey; `block-template.ts` uses it to pay the coinbase output to `config.coinbaseAddress` instead of an OP_RETURN. Legacy base58 (`1.../3...`) addresses are unsupported.
 
 ## Business Logic
+- **The DB is the only password store for Luanti.** `luanti_password` holds an SRP entry (`#1#<b64 salt>#<b64 verifier>`) built by `crypto::luantiSrpEntry`, byte-compatible with the engine's `encode_srp_verifier` — the mod serves it back to the engine instead of letting a local `auth.sqlite` verifier exist. Two writers: `registerOwner` (web) and `registerLuantiGuest` (in-game signup relayed by `POST /internal/luanti-register`, the only hook the engine leaves, since it never reveals the plaintext). The verifier is derived from the **lowercased** name, which is what kills the old casing divergence.
+- **`listLuantiAuthEntries` lists everyone, `can_own` decides ownership.** It returns every row with a username and a password entry, guests included, each carrying `can_own` — the mod needs guests in the mirror to authenticate them at all, so "present in the list" no longer means "is an owner".
 - **Ownership gate.** A player can only own creatures (`POST /hashimons`) if `public_key` is set (`players::canOwn`). Anonymous/guest players (Luanti without a key) can play but not own — enforced at the domain layer, not just HTTP.
 - **Server owns the birth.** `hashimons::emit` generates the birth nonce itself so a client can never grind for a rare DNA; on the astronomically unlikely `dna` unique-constraint collision (Postgres code `23505`) it retries with a new nonce up to 5 times.
 - **Derived, never stored.** Stats, colour, type, rank all come from `present()` recomputing `dna + pow` via the Caos Core on every read — the row only stores provenance and PoW biography, so a ruleset change never requires a data migration.
@@ -42,7 +44,7 @@ from the client and re-derives or re-verifies rather than storing decided values
 - `@/config` — `blockTargetBits`, `jobTtlMs`, `templateRefreshMs`, `btcNodeUrl` all live here; `mining.ts`/`block-template.ts` never hardcode tuning values.
 
 **External:**
-- `argon2` — password hashing for `password_hash` (registerOwner/loginOwner); chosen over the legacy SHA1 `luanti_password` which exists only for backward compat with the Luanti server's own auth format.
+- `argon2` — password hashing for `password_hash` (registerOwner/loginOwner). It is unrelated to `luanti_password`, whose format is dictated by the engine (SRP-6a verifier) and is not a password hash the server ever verifies itself.
 - `@noble/secp256k1` — key generation/validation matching the same curve the client/wallet uses.
 
 **Environment Variables:**

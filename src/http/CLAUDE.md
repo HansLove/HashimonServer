@@ -57,6 +57,16 @@ separate secret-header gate (`X-Luanti-Secret`, constant-time compared) for the
 Luanti bridge, and stamps `auth_source: "luanti"` instead. `auth_source` defaults to
 `"none"` on the event and is always overwritten by whichever gate actually ran.
 
+**The Luanti bridge is three routes over one password store (`routes/internal.ts`).**
+`GET /internal/luanti-auth` publishes every named account with a `luanti_password`
+(the engine-format SRP entry `#1#salt#verifier`) plus `can_own` — the mod mirrors that
+list and answers the engine's `get_auth` from it, so guests must be in it too.
+`POST /internal/luanti-register` is the write side: the mod relays the entry the engine
+built during an in-game signup, and `registerLuantiGuest` inserts a keyless guest row
+(409 on a name taken in any casing, 422 on anything that is not an SRP entry). The
+password entry itself is never enriched onto the event — the wide event carries
+`username`, `register_result`, `register_source` and `player_id`, nothing from the body.
+
 **Emission gating (`routes/hashimons.ts`):** `POST /hashimons` requires
 `canOwn(player)` (a public key), rejects unknown species, and additionally enforces
 genesis species must use `provenance: "starter"` and only once per player

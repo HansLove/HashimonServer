@@ -83,11 +83,16 @@ starter, `custody: server_encrypted` or `player`). Anonymous `POST /session` and
 Luanti guests without a `public_key` can play but **cannot** `POST /hashimons` (403
 `cannot_own`) — see `canOwn` in `domain/players.ts`.
 
-**Luanti bridge.** `X-Luanti-Secret` (`LUANTI_SERVER_SECRET`) gates
-`src/http/routes/internal.ts`. The Luanti world polls `GET /internal/luanti-auth`
-every ~2s for the owner list and calls `POST /internal/luanti-bind` on join (no
-password forwarded — the engine already verified the API-published hash). If a guest
-name is later registered on the web, the API password wins on the next poll.
+**Luanti bridge — the DB is the only password store.** `X-Luanti-Secret`
+(`LUANTI_SERVER_SECRET`) gates `src/http/routes/internal.ts`. `luanti_password` holds an
+engine-format SRP entry (`#1#salt#verifier`, `domain/crypto.ts::luantiSrpEntry`), written
+by both signup surfaces: web `/register` and `POST /internal/luanti-register` (the mod
+relays what the engine built for an in-game signup — the plaintext never leaves the
+client). The world polls `GET /internal/luanti-auth` every ~2s for **every** named
+account plus `can_own`, answers the engine's `get_auth` from that mirror, and calls
+`POST /internal/luanti-bind` on join for owners. Changing a password in-game is refused;
+the web is the only place it changes. A name already taken — guest or owner — is 409 on
+`/register`; there is no claim flow.
 
 **Logging is one wide event per request.** `src/http/wide-event.ts` holds an
 `AsyncLocalStorage<WideEvent>`; `wideEventMiddleware` (mounted first in `http/app.ts`) is
