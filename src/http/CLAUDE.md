@@ -63,9 +63,12 @@ Luanti bridge, and stamps `auth_source: "luanti"` instead. `auth_source` default
 list and answers the engine's `get_auth` from it, so guests must be in it too.
 `POST /internal/luanti-register` is the write side: the mod relays the entry the engine
 built during an in-game signup, and `registerLuantiGuest` inserts a keyless guest row
-(409 on a name taken in any casing, 422 on anything that is not an SRP entry). The
-password entry itself is never enriched onto the event — the wide event carries
-`username`, `register_result`, `register_source` and `player_id`, nothing from the body.
+(201 on success; 409 `username_taken` on a name taken in any casing; 422
+`invalid_username` or `invalid_password_entry` if the body isn't a well-formed
+`#1#salt#verifier` string). The DB is the only password store — there is no fallback
+verifier, and the mod refuses in-game password changes. The password entry itself is never enriched onto the event — the wide
+event carries `username`, `register_result`, `register_source` and `player_id`,
+nothing from the body.
 
 **Emission gating (`routes/hashimons.ts`):** `POST /hashimons` requires
 `canOwn(player)` (a public key), rejects unknown species, and additionally enforces
