@@ -9,6 +9,7 @@ import {
   encryptPrivateKey,
   generateSecp256k1Keypair,
   isValidCompressedPublicKey,
+  isLuantiSrpEntry,
   isValidLuantiUsername,
   luantiSrpEntry,
   type Custody,
@@ -269,15 +270,57 @@ export async function loginOwner(username: string, password: string): Promise<{
   };
 }
 
-/** Owners with a key, for Luanti auth cache poll. */
-export async function listLuantiAuthEntries(): Promise<Array<{ name: string; password: string }>> {
-  const res = await query<{ username: string; luanti_password: string }>(
-    `SELECT username, luanti_password FROM players
+export interface LuantiAuthEntry {
+  name: string;
+  password: string;
+  can_own: boolean;
+}
+
+/** Every named account with a password entry — the mod mirrors this list and answers
+ *  `get_auth` from it, so guests registered in-game must be in it too. `can_own`
+ *  replaces "presence in the list means owner": presence now only means "the DB knows
+ *  this password". */
+export async function listLuantiAuthEntries(): Promise<LuantiAuthEntry[]> {
+  const res = await query<{ username: string; luanti_password: string; public_key: string | null }>(
+    `SELECT username, luanti_password, public_key FROM players
       WHERE username IS NOT NULL
-        AND luanti_password IS NOT NULL
-        AND public_key IS NOT NULL`
+        AND luanti_password IS NOT NULL`
   );
-  return res.rows.map((r) => ({ name: r.username, password: r.luanti_password }));
+  return res.rows.map((r) => ({
+    name: r.username,
+    password: r.luanti_password,
+    can_own: canOwn(r),
+  }));
+}
+
+/** A player who registered from the Luanti client: username + the SRP entry the engine
+ *  built from the password they typed, nothing else. No `password_hash` (they never
+ *  gave us a plaintext to argon2) and no key, so `canOwn` stays false until they
+ *  register on the web. */
+export async function registerLuantiGuest(name: string, passwordEntry: string): Promise<Player> {
+  const username = name.trim();
+  if (!isValidLuantiUsername(username)) {
+    throw new AppError(422, "invalid username (1–20 chars: A-Z a-z 0-9 _ -)", "invalid_username");
+  }
+  if (!isLuantiSrpEntry(passwordEntry)) {
+    throw new AppError(422, "password must be a Luanti SRP entry (#1#salt#verifier)", "invalid_password_entry");
+  }
+  try {
+    const inserted = await query<Player>(
+      `INSERT INTO players (username, luanti_password, display_name)
+       VALUES ($1, $2, $1) RETURNING *`,
+      [username, passwordEntry]
+    );
+    return inserted.rows[0]!;
+  } catch (err: unknown) {
+    // No pre-SELECT: the unique index is what makes the check race-free against two
+    // worlds registering the same name in the same tick.
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("players_username_lower_idx")) {
+      throw new AppError(409, "username already registered", "username_taken");
+    }
+    throw err;
+  }
 }
 
 export async function claimSelfCustody(playerId: string): Promise<Player> {

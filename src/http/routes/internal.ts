@@ -10,6 +10,7 @@ import {
   getPlayerByUsername,
   listLuantiAuthEntries,
   presentPlayer,
+  registerLuantiGuest,
 } from "@/domain/players";
 
 export const internalRouter = Router();
@@ -32,7 +33,9 @@ function requireLuantiSecret(req: { header: (n: string) => string | undefined })
   enrich({ auth_source: "luanti" });
 }
 
-/** Poll target for Luanti hybrid auth — only owners (username + key). */
+/** Poll target for Luanti auth — every named account with a password entry, owner or
+ *  not. The mod answers `get_auth` from this list, so leaving guests out would make the
+ *  engine fall back to a local verifier and the two stores would diverge again. */
 internalRouter.get(
   "/internal/luanti-auth",
   asyncHandler(async (req, res) => {
@@ -42,6 +45,25 @@ internalRouter.get(
     //count going flat or dropping is how a broken bridge announces itself.
     enrich({ account_count: accounts.length });
     res.json({ accounts });
+  })
+);
+
+const registerSchema = z.object({
+  name: z.string().min(1).max(20),
+  password: z.string().min(1),
+});
+
+/** The only way an in-game registration reaches the DB: the engine hands the mod the
+ *  SRP entry it just built (it never sees the plaintext), the mod forwards it here. */
+internalRouter.post(
+  "/internal/luanti-register",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { name, password } = registerSchema.parse(req.body ?? {});
+    enrich({ username: name });
+    const player = await registerLuantiGuest(name, password);
+    enrich({ register_result: "ok", player_id: player.id, register_source: "luanti" });
+    res.status(201).json({ player: presentPlayer(player) });
   })
 );
 
