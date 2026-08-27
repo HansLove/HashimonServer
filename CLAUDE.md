@@ -130,10 +130,24 @@ deliberately *not* on "not terminal": a charge the player cancelled, or that BTC
 expire, still credits if the money lands. Never make bookkeeping the reason a real payment
 goes uncredited — `payments.test.ts` pins both halves.
 
-`createPayment` writes the ledger row **before** calling BTCPay, so a duplicate is
-rejected by the index without leaving an orphan invoice at the gateway; a gateway failure
-then marks the row `failed`, which also releases the index. That is why `invoice_id`,
-`address`, `amount_btc`, `bip21` and `checkout_link` are nullable.
+**The write order in `createPayment` is load-bearing.** Ledger row first (so the index
+rejects a duplicate before an invoice exists), then `invoice_id` in its own UPDATE
+*immediately* — it is the only handle `applyWebhook` has on the row, and the invoice is
+payable the moment BTCPay returns it. Only a charge with no invoice behind it is ever written
+off as `failed`. A later `getPaymentMethods` failure is survivable, not fatal: the charge
+keeps `checkout_link` (BTCPay's hosted page) and loses only the QR. Hence the nullable
+`invoice_id`/`address`/`amount_btc`/`bip21`/`checkout_link`.
+
+**`expireStaleCharges` touches `waiting` only, never `confirming`** (and runs on
+`activePaymentFor` too, so a dead charge is never offered back to resume). BTCPay keeps
+watching a confirming invoice past `expirationTime` (`monitoringMinutes`); expiring one would
+free the index, open a second invoice, and leave the player with two payable addresses for
+one plan — the transition `cancelPayment` refuses with 409 `payment_in_flight`.
+
+**An empty `BTCPAY_WEBHOOK_SECRET` would be an anonymous credit-minting endpoint**: the
+library verifies the HMAC only `if (config.webhookSecret)`, and nothing else fails when the
+variable is missing. `requireWebhookSecret` answers 503 before the middleware is reached.
+Confirmed both ways — without the guard an unsigned POST minted 3000 credits.
 
 **The webhook router is mounted before `express.json()`** (`http/app.ts`) and it is the
 only one that is: the HMAC covers the raw bytes. Reverse those two lines and every
@@ -171,7 +185,14 @@ Per README/ADR: payments must go through a provider, never hand-rolled — this 
 real security/regulatory weight. Crypto goes through BTCPay via
 `@taloon/btcpay-middleware` (which owns the HMAC verification); fiat, if it ever
 happens, goes through a Stripe-class provider. Never verify a signature, compute a
-rate, or reconcile a payment by hand here. Payouts and refunds are untouched: BTCPay
-marks an underpayment `Invalid`, the charge becomes `failed`, and the player goes to
-support. Owner passwords and encrypted keys are an intentional stopgap for the
-web↔Luanti bridge, not production-grade wallet custody as-is.
+rate, or reconcile a payment by hand here. Payouts and refunds are untouched: an
+underpayment surfaces as `InvoiceExpired` with `partiallyPaid: true` (or `InvoiceInvalid`,
+depending on when the shortfall is noticed), so the charge lands in `expired` or `failed`
+and the player goes to support. The **only** signal support gets that coins actually arrived
+is `payment_partially_paid` / `payment_over_paid` on the wide event — nothing is stored on
+the row. Owner passwords and encrypted keys are an intentional stopgap for the web↔Luanti
+bridge, not production-grade wallet custody as-is.
+
+Three gaps are recorded, not closed — see *Known gaps in the payment flow* in README.md:
+no reconciliation sweeper against BTCPay, cancel does not archive the gateway invoice, and
+buying is gated by `requireSession` alone rather than `canOwn`.

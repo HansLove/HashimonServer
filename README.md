@@ -244,22 +244,50 @@ Webhook events map as: `InvoiceReceivedPayment`/`InvoiceProcessing` → `confirm
 The webhook is mounted **before** `express.json()` so the HMAC can be computed over the
 raw bytes — the signature covers the exact body, so `--data-raw` must send it byte for byte:
 
+Run it from the project root — `node -e` resolves `@taloon/btcpay-middleware` from
+`node_modules`. `SECRET` must be the same value the running server has in
+`BTCPAY_WEBHOOK_SECRET`; `node -e` does not read `.env`, so pass it explicitly.
+
 ```bash
 curl -s localhost:4000/payments/plans | jq
 
+SECRET=smoke-secret   # whatever the server was started with
 BODY='{"deliveryId":"d1","webhookId":"w1","originalDeliveryId":"d1","isRedelivery":false,"type":"InvoiceSettled","timestamp":0,"storeId":"s","invoiceId":"inv-demo"}'
-SIG=$(BODY="$BODY" node --input-type=module \
+SIG=$(BODY="$BODY" SECRET="$SECRET" node --input-type=module \
   -e 'import {computeSignature} from "@taloon/btcpay-middleware";
-      process.stdout.write(computeSignature(Buffer.from(process.env.BODY,"utf8"), process.env.BTCPAY_WEBHOOK_SECRET));')
+      process.stdout.write(computeSignature(Buffer.from(process.env.BODY,"utf8"), process.env.SECRET));')
 
 curl -s -X POST localhost:4000/payments/btcpay-server/webhook \
   -H 'content-type: application/json' -H "btcpay-sig: sha256=$SIG" --data-raw "$BODY"
 # {"status":"ok"} — send it twice: credits move once.
 ```
 
-Seed a row with that `invoice_id` first, or the webhook is a no-op on an unknown invoice.
-Forcing `status` in the DB is also how to walk the client through every screen without
-waiting on the Bitcoin network.
+The `sha256=` prefix is required; without it the middleware rejects the header before
+comparing anything. Seed a row with that `invoice_id` first, or the webhook is a no-op on an
+unknown invoice. Forcing `status` in the DB is also how to walk the client through every
+screen without waiting on the Bitcoin network.
+
+**With no `BTCPAY_WEBHOOK_SECRET` set, the route answers 503 and never reaches the
+middleware.** That is deliberate: the library verifies the HMAC only `if (webhookSecret)`, so
+a blank secret would make this an anonymous credit-minting endpoint, and nothing else about
+the app would fail to announce it.
+
+### Known gaps in the payment flow
+
+Recorded rather than fixed — each needs a decision, not just code:
+
+- **No reconciliation against BTCPay.** `applyWebhook` is the only writer of `settled`. If
+  every delivery of an `InvoiceSettled` fails (server down through the whole retry window),
+  the charge stays `confirming` forever: money in, credits never granted, no alarm.
+  `BTCPayClient.getInvoice` exists and is unused — a sweeper over stale `confirming` rows is
+  the fix when this matters.
+- **Cancelling does not archive the invoice at BTCPay**, which the library exposes no method
+  for. A cancelled charge's address stays payable; it still credits if paid
+  (`settleAndCredit` guards only on `<> 'settled'`), but orphan invoices accumulate.
+- **Buying is gated by `requireSession` only, not `canOwn`.** A keyless anonymous player can
+  spend real BTC on credits reachable only through that one bearer token — clear the browser
+  storage and they are gone. Deliberate (the checkout is only reachable from the portal, which
+  requires `/register` or `/login`), but it is the one value-bearing route with no `canOwn`.
 
 ## Logging — one wide event per request
 
