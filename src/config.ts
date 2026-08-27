@@ -54,4 +54,11 @@ export const config = {
   // unspendable OP_RETURN. Required only in bitcoin mode, no default — see
   // src/domain/bitcoin-address.ts.
   coinbaseAddress: miningMode === "bitcoin" ? requireEnv("HASHIMON_COINBASE_ADDRESS") : (process.env.HASHIMON_COINBASE_ADDRESS ?? ""),
+  // BTCPay Server — credit purchases. The middleware reads these env names on its own,
+  // but config stays the single source and hands them to configure() explicitly.
+  // btcpayApiKey and btcpayWebhookSecret are secrets: never log them, never enrich() them.
+  btcpayBaseUrl: process.env.BTCPAY_BASE_URL ?? "",
+  btcpayApiKey: process.env.BTCPAY_API_KEY ?? "",
+  btcpayStoreId: process.env.BTCPAY_STORE_ID ?? "",
+  btcpayWebhookSecret: process.env.BTCPAY_WEBHOOK_SECRET ?? "",
 } as const;

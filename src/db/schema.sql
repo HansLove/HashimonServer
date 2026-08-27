@@ -101,6 +101,71 @@ CREATE TABLE IF NOT EXISTS submitted_shares (
   created_at      timestamptz NOT NULL DEFAULT now()
 );
 
+-- The credit catalogue. The server fixes the price: a client sends a sku, never an
+-- amount. Changing a price is an UPDATE, not a deploy. No admin CRUD yet — plans are
+-- edited by SQL until an administration surface exists.
+CREATE TABLE IF NOT EXISTS credits_plans (
+  sku        text PRIMARY KEY,
+  credits    bigint NOT NULL,
+  price_usd  numeric(10,2) NOT NULL,
+  sort_order integer NOT NULL DEFAULT 0,
+  is_active  boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Provisional seed. DO NOTHING is what keeps migrate idempotent here and, more
+-- importantly, stops a redeploy from reverting a price edited in production.
+INSERT INTO credits_plans (sku, credits, price_usd, sort_order) VALUES
+  ('credits_500',   500,  5.00, 1),
+  ('credits_1200', 1200, 10.00, 2),
+  ('credits_3000', 3000, 25.00, 3)
+ON CONFLICT (sku) DO NOTHING;
+
+-- The payment ledger. Six states, all decided by the server:
+--   waiting → confirming → settled | expired | failed | cancelled
+-- (the last four are terminal). The client never runs a state machine of its own —
+-- the phase of its UI *is* this column.
+--
+-- sku/credits/amount_usd are a SNAPSHOT taken when the charge is created, not a live
+-- lookup: raising a plan's price must never revalue a charge already issued. The FK
+-- to credits_plans is referential integrity, nothing more.
+--
+-- invoice_id/amount_btc/address/bip21/checkout_link are null between the INSERT and
+-- the BTCPay call that fills them: the row is written first precisely so the partial
+-- unique index below rejects a duplicate charge *before* an invoice is created at the
+-- gateway. expires_at defaults to a short window so a row orphaned by a crash in
+-- between is stale rather than permanent (see createPayment in domain/payments.ts).
+CREATE TABLE IF NOT EXISTS payments (
+  order_id      text PRIMARY KEY,
+  player_id     uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  gateway       text NOT NULL DEFAULT 'btcpay-server',
+  invoice_id    text,
+  status        text NOT NULL DEFAULT 'waiting'
+                CHECK (status IN ('waiting', 'confirming', 'settled', 'expired', 'failed', 'cancelled')),
+  sku           text NOT NULL REFERENCES credits_plans(sku),
+  credits       bigint NOT NULL,
+  amount_usd    numeric(10,2) NOT NULL,
+  amount_btc    text,
+  address       text,
+  bip21         text,
+  checkout_link text,
+  expires_at    timestamptz NOT NULL DEFAULT now() + interval '20 minutes',
+  settled_at    timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS payments_player_idx ON payments(player_id);
+
+-- The webhook identifies an invoice by BTCPay's own id, not by our order_id.
+CREATE UNIQUE INDEX IF NOT EXISTS payments_invoice_idx
+  ON payments (invoice_id) WHERE invoice_id IS NOT NULL;
+
+-- Idempotency as an index, not an `if`: one live charge per player. Two simultaneous
+-- POSTs — one wins, the other gets 23505, which the route turns into 409
+-- payment_pending. Same shape as players_username_lower_idx above.
+CREATE UNIQUE INDEX IF NOT EXISTS payments_active_per_player_idx
+  ON payments (player_id) WHERE status IN ('waiting', 'confirming');
+
 -- Append-only audit log.
 CREATE TABLE IF NOT EXISTS audit_log (
   id           bigserial PRIMARY KEY,
