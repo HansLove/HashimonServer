@@ -2,7 +2,7 @@
 
 Guía para jugadores y desarrolladores sobre cómo nace un Hashimon, qué hace su ADN y cómo evoluciona con la minería.
 
-Documentos relacionados: [Generación, tipos y prompts (paper técnico)](./HASHIMON_GENERACION_Y_TIPOS.md) · [White Paper v2](./Hashimon_white_paper_2_V1.md) · [PoW bound mode](./HASHIMON-RABBIT-POW.md) · [POW_SPEC](./POW_SPEC.md)
+Documentos relacionados: [Generación, tipos y prompts (paper técnico)](./HASHIMON_GENERACION_Y_TIPOS.md) · [Handoff prompts → Meshy](./DEV_HANDOFF_ADN_PROMPTS_MESHY.md) · [White Paper v2](./Hashimon_white_paper_2_V1.md) · [PoW bound mode](./HASHIMON-RABBIT-POW.md) · [POW_SPEC](./POW_SPEC.md)
 
 ---
 

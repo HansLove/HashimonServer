@@ -4,7 +4,7 @@
 
 **Audiencia:** equipo de desarrollo (backend, Luanti, portal).
 
-Relacionados: [`HASHIMON_GENERACION_Y_TIPOS.md`](./HASHIMON_GENERACION_Y_TIPOS.md) *(nota: partes de ese documento describen un cliente `game/Content/*.js` que ya no existe en el repo — ver aviso al inicio de ese archivo)* · [`POW_SPEC.md`](./POW_SPEC.md) · [`HASHIMON-RABBIT-POW.md`](./HASHIMON-RABBIT-POW.md)
+Relacionados: [`HASHIMON_GENERACION_Y_TIPOS.md`](./HASHIMON_GENERACION_Y_TIPOS.md) *(nota: partes de ese documento describen un cliente `game/Content/*.js` que ya no existe en el repo — ver aviso al inicio de ese archivo)* · [`DEV_HANDOFF_ADN_PROMPTS_MESHY.md`](./DEV_HANDOFF_ADN_PROMPTS_MESHY.md) · [`POW_SPEC.md`](./POW_SPEC.md) · [`HASHIMON-RABBIT-POW.md`](./HASHIMON-RABBIT-POW.md)
 
 ---
 
