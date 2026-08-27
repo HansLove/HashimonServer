@@ -11,9 +11,10 @@ creatures or decides outcomes — it holds the emission ledger (who owns what) a
 full rationale.
 
 Phase 1 (current) scope: identity + inventory + emission ledger + bound-mode PoW
-mining. Real proof-of-work submission against a live bitcoin/pool target, incubation
-/ Caos Engine seeding, credits/payments, and an MCP layer are later phases layered on
-top of this — do not build them speculatively.
+mining, plus buying credits with Bitcoin through BTCPay. Real proof-of-work submission
+against a live bitcoin/pool target, incubation / Caos Engine seeding, a *sink* for those
+credits, and an MCP layer are later phases layered on top of this — do not build them
+speculatively.
 
 ## Commands
 
@@ -24,7 +25,8 @@ pnpm build             # tsc --noEmit, then esbuild bundle to dist/, copies sche
 pnpm start             # node dist/server.js (run build first)
 pnpm migrate           # node dist/db/migrate.js — applies schema.sql (idempotent)
 pnpm typecheck         # tsc --noEmit
-pnpm test              # node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts
+pnpm test              # node --import tsx --test — core, auth, payments, wide-event suites
+                       # (the auth and payments suites need a live Postgres)
 ```
 
 Run a single test file directly: `node --import tsx --test src/core/core.test.ts`
@@ -47,7 +49,9 @@ src/db/       pool.ts (pg pool + withTransaction), schema.sql (source of truth f
               tables), migrate.ts (applies schema.sql, idempotent — no migration files).
 src/domain/   Business logic: players.ts (identity + bearer sessions), hashimons.ts
               (emission/birth, inventory, present() derived view), mining.ts (PoW job
-              issuance + share submission), audit.ts (append-only log), crypto.ts.
+              issuance + share submission), credit-plans.ts (the catalogue — where a
+              price comes from), payments.ts (charges + webhook transitions),
+              audit.ts (append-only log), crypto.ts.
 src/http/     app.ts (express wiring), auth.ts (requireSession bearer gate), errors.ts
               (AppError + errorMiddleware), routes/ (one router per resource).
 src/server.ts Entry point.
@@ -101,6 +105,37 @@ touching `luanti_password`. `/register` returns 200 on a claim, 201 on a fresh
 registration; any other name collision (wrong password, or a row that already has a
 `password_hash`/`public_key`) is still 409 `username_taken`.
 
+**Credit purchases (`src/domain/payments.ts`, `credits_plans` + `payments` tables).**
+The only path by which `players.credits` ever moves. A request carries a **`sku`, never
+an amount** — `planFor()` reads the price, and the zod schema in
+`http/routes/payments.ts` is `.strict()` so a smuggled `amount`/`price` is a 400 rather
+than a field quietly ignored. `payments` snapshots `sku`/`credits`/`amount_usd` at
+creation: repricing a plan must never revalue a charge already issued, so the FK to
+`credits_plans` is referential integrity and nothing more.
+
+Six statuses, all server-decided — `waiting → confirming → settled | expired | failed |
+cancelled`, the last four terminal. **The client runs no state machine**; its UI phase
+*is* this column. Two guarantees are SQL, not `if`s: `payments_active_per_player_idx`
+(unique partial index over the live statuses) makes a second concurrent charge a `23505`,
+which the route turns into 409 `payment_pending` *with the live charge in the body*; and
+`applyWebhook`'s `UPDATE … WHERE status <> 'settled' RETURNING *` is what makes crediting
+once-only — BTCPay redelivers (`isRedelivery`), so a repeat is the normal case, and the
+credit + `audit()` ride in one `withTransaction`. Same conditional-transition shape as
+`claimSelfCustody`.
+
+`createPayment` writes the ledger row **before** calling BTCPay, so a duplicate is
+rejected by the index without leaving an orphan invoice at the gateway; a gateway failure
+then marks the row `failed`, which also releases the index. That is why `invoice_id`,
+`address`, `amount_btc`, `bip21` and `checkout_link` are nullable.
+
+**The webhook router is mounted before `express.json()`** (`http/app.ts`) and it is the
+only one that is: the HMAC covers the raw bytes. Reverse those two lines and every
+delivery fails with an opaque 401. `payments-webhook.ts` maps
+`BTCPayWebhookSignatureError` to 401 on purpose — as an unknown error it would surface as
+a 500, which tells BTCPay to keep retrying a delivery that can never be accepted.
+`domain/payments.ts` builds its own `BTCPayClient` lazily (not at import: `migrate.ts` and
+the test suites load domain code with no gateway configured).
+
 **Logging is one wide event per request.** `src/http/wide-event.ts` holds an
 `AsyncLocalStorage<WideEvent>`; `wideEventMiddleware` (mounted first in `http/app.ts`) is
 the *only* thing that emits a request log line, in `res.on("finish")`. Everything else
@@ -125,7 +160,11 @@ Don't duplicate that table here; read it before touching `src/http/routes/`.
 
 ## Do not build by hand
 
-Per README/ADR: payments (Phase 4) must go through a provider (Stripe-class), never
-hand-rolled — this carries real security/regulatory weight. Owner passwords and
-encrypted keys are an intentional stopgap for the web↔Luanti bridge, not
-production-grade wallet custody as-is.
+Per README/ADR: payments must go through a provider, never hand-rolled — this carries
+real security/regulatory weight. Crypto goes through BTCPay via
+`@taloon/btcpay-middleware` (which owns the HMAC verification); fiat, if it ever
+happens, goes through a Stripe-class provider. Never verify a signature, compute a
+rate, or reconcile a payment by hand here. Payouts and refunds are untouched: BTCPay
+marks an underpayment `Invalid`, the charge becomes `failed`, and the player goes to
+support. Owner passwords and encrypted keys are an intentional stopgap for the
+web↔Luanti bridge, not production-grade wallet custody as-is.
