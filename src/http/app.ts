@@ -9,6 +9,8 @@ import { hashimonsRouter } from "@/http/routes/hashimons";
 import { authRouter } from "@/http/routes/auth";
 import { internalRouter } from "@/http/routes/internal";
 import { walletRouter } from "@/http/routes/wallet";
+import { paymentsRouter } from "@/http/routes/payments";
+import { paymentsWebhookRouter } from "@/http/routes/payments-webhook";
 import { errorMiddleware } from "@/http/errors";
 import { wideEventMiddleware } from "@/http/wide-event";
 
@@ -28,6 +30,11 @@ export function createApp(logger?: Logger) {
       exposedHeaders: ["X-Request-Id"],
     })
   );
+  //Before express.json() on purpose, and the only router that is: the BTCPay webhook
+  //verifies an HMAC over the raw bytes, so a parsed body would fail every signature.
+  //Swap these two lines and the symptom is an opaque 401 on every delivery.
+  app.use(paymentsWebhookRouter);
+
   app.use(express.json());
 
   app.use(healthRouter);
@@ -36,6 +43,7 @@ export function createApp(logger?: Logger) {
   app.use(profileRouter);
   app.use(hashimonsRouter);
   app.use(walletRouter);
+  app.use(paymentsRouter);
   app.use(internalRouter);
 
   app.use((_req, res) => {
