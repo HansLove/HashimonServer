@@ -34,6 +34,4 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 EXPOSE 4000
-# schema.sql is idempotent — apply it before listen so /register columns exist
-# after this branch reaches a droplet that was still on main's Phase-1 schema.
-CMD ["sh", "-c", "node dist/db/migrate.js && node dist/server.js"]
+CMD ["node", "dist/server.js"]
