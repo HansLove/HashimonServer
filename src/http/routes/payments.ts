@@ -46,6 +46,9 @@ paymentsRouter.post(
       //discard" without a second round trip.
       const live = await activePaymentFor(req.player!.id);
       if (live) { enrichPayment(live); }
+      //Responding here bypasses errorMiddleware, so the event has to be told about the
+      //failure by hand or this request logs as a plain 409 with no error_code at all.
+      enrich({ error_code: err.code, error_message: err.message });
       res.status(409).json({
         error: err.message,
         code: err.code,

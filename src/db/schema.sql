@@ -106,12 +106,23 @@ CREATE TABLE IF NOT EXISTS submitted_shares (
 -- edited by SQL until an administration surface exists.
 CREATE TABLE IF NOT EXISTS credits_plans (
   sku        text PRIMARY KEY,
-  credits    bigint NOT NULL,
-  price_usd  numeric(10,2) NOT NULL,
+  credits    bigint NOT NULL CONSTRAINT credits_plans_credits_positive CHECK (credits > 0),
+  price_usd  numeric(10,2) NOT NULL CONSTRAINT credits_plans_price_positive CHECK (price_usd > 0),
   sort_order integer NOT NULL DEFAULT 0,
   is_active  boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- The catalogue is edited by hand in SQL, so the fat-finger guard belongs in the database.
+-- A price of 0.00 would make BTCPay settle an invoice for nothing and mint the plan's
+-- credits on every request. Postgres has no ADD CONSTRAINT IF NOT EXISTS; the DO block is
+-- the idempotent idiom, and a no-op on a database created after the constraints existed.
+DO $$ BEGIN
+  ALTER TABLE credits_plans ADD CONSTRAINT credits_plans_credits_positive CHECK (credits > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE credits_plans ADD CONSTRAINT credits_plans_price_positive CHECK (price_usd > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- Provisional seed. DO NOTHING is what keeps migrate idempotent here and, more
 -- importantly, stops a redeploy from reverting a price edited in production.

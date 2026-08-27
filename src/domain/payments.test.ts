@@ -1,7 +1,13 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { WebhookEventType, type BTCPayWebhookPayload } from "@taloon/btcpay-middleware";
-import { applyWebhook, cancelPayment, statusForWebhookEvent } from "@/domain/payments";
+import {
+  activePaymentFor,
+  applyWebhook,
+  cancelPayment,
+  onChainMethod,
+  statusForWebhookEvent,
+} from "@/domain/payments";
 import { pool, query } from "@/db/pool";
 import { AppError } from "@/http/errors";
 
@@ -43,6 +49,27 @@ describe("webhook event mapping", () => {
     assert.equal(statusForWebhookEvent(WebhookEventType.PAYOUT_CREATED), null);
     assert.equal(statusForWebhookEvent(WebhookEventType.PAYOUT_APPROVED), null);
     assert.equal(statusForWebhookEvent(WebhookEventType.PAYOUT_UPDATED), null);
+  });
+});
+
+describe("payment method selection", () => {
+  function method(paymentMethodId: string, paymentLink: string | null) {
+    return { paymentMethodId, paymentLink, currency: "BTC", destination: "d", amount: "1", due: "1", rate: "1", activated: true };
+  }
+
+  it("picks the on-chain method under either Greenfield naming", () => {
+    const chain = method("BTC-CHAIN", "bitcoin:bc1q…");
+    assert.equal(onChainMethod([method("BTC-LN", "lightning:lnbc1…"), chain]), chain);
+    const legacy = method("BTC", "bitcoin:bc1q…");
+    assert.equal(onChainMethod([legacy, method("BTC-LightningNetwork", "lightning:lnbc1…")]), legacy);
+  });
+
+  // The dangerous case: a `?? methods[0]` fallback here would put a bolt11 invoice in
+  // `address` and a lightning: URI in `bip21`, which the client renders as an on-chain QR.
+  // Returning nothing leaves checkout_link to carry the payment instead.
+  it("returns nothing rather than a Lightning method when there is no on-chain one", () => {
+    assert.equal(onChainMethod([method("BTC-LN", "lightning:lnbc1…")]), undefined);
+    assert.equal(onChainMethod([]), undefined);
   });
 });
 
@@ -156,6 +183,29 @@ describe("webhook application (against the local DB)", () => {
       cancelPayment(`credits-${invoiceId}`, playerId),
       (err: unknown) => err instanceof AppError && err.code === "payment_terminal"
     );
+  });
+
+  // The other half of the payment_in_flight guard: expiring a confirming charge on any
+  // path would free the partial index, let a second invoice open, and leave the player
+  // with two payable addresses for one plan.
+  it("never expires a confirming charge, however far past expires_at it is", async () => {
+    const invoiceId = uniqueInvoiceId();
+    const playerId = await seedWaitingCharge(invoiceId);
+    await applyWebhook(webhookPayload(WebhookEventType.INVOICE_RECEIVED_PAYMENT, invoiceId));
+    await query(`UPDATE payments SET expires_at = now() - interval '1 hour' WHERE invoice_id = $1`, [invoiceId]);
+
+    const active = await activePaymentFor(playerId);
+    assert.equal(active?.status, "confirming");
+  });
+
+  it("sweeps a waiting charge whose invoice has expired instead of offering it to resume", async () => {
+    const invoiceId = uniqueInvoiceId();
+    const playerId = await seedWaitingCharge(invoiceId);
+    await query(`UPDATE payments SET expires_at = now() - interval '1 hour' WHERE invoice_id = $1`, [invoiceId]);
+
+    assert.equal(await activePaymentFor(playerId), null);
+    const row = await query<{ status: string }>(`SELECT status FROM payments WHERE invoice_id = $1`, [invoiceId]);
+    assert.equal(row.rows[0]?.status, "expired");
   });
 
   it("does nothing for an invoice the ledger has never heard of", async () => {

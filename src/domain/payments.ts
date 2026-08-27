@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
   BTCPayClient,
+  BTCPayConfiguration,
   WebhookEventType,
   type BTCPayPaymentMethod,
   type BTCPayWebhookPayload,
 } from "@taloon/btcpay-middleware";
-import { config } from "@/config";
-import { isUniqueViolation, query, withTransaction, type Sql } from "@/db/pool";
+import { isUniqueViolation, query, withTransaction } from "@/db/pool";
 import { AppError } from "@/http/errors";
 import { enrich } from "@/http/wide-event";
 import { audit } from "@/domain/audit";
@@ -80,39 +80,21 @@ export async function createPayment(playerId: string, sku: string): Promise<Paym
   await expireStaleCharges(playerId);
 
   const orderId = `credits-${randomUUID()}`;
-  const opened = await insertWaitingCharge(orderId, playerId, plan);
+  await insertWaitingCharge(orderId, playerId, plan);
 
+  let invoice;
   try {
-    const invoice = await gateway().createInvoice({
+    invoice = await gateway().createInvoice({
       amount: plan.price_usd,
       currency: "USD",
       orderId,
       description: `${plan.credits} Hashimon credits`,
       metadata: { playerId, sku: plan.sku, credits: plan.credits },
     });
-    const method = onChainMethod(await gateway().getPaymentMethods(invoice.id));
-
-    const res = await query<PaymentRow>(
-      `UPDATE payments
-          SET invoice_id = $2, amount_btc = $3, address = $4, bip21 = $5,
-              checkout_link = $6, expires_at = $7, updated_at = now()
-        WHERE order_id = $1
-        RETURNING *`,
-      [
-        orderId,
-        invoice.id,
-        method?.amount ?? null,
-        method?.destination ?? null,
-        method?.paymentLink ?? null,
-        invoice.checkoutLink,
-        //Greenfield reports expirationTime in unix seconds.
-        new Date(invoice.expirationTime * 1000).toISOString(),
-      ]
-    );
-    return res.rows[0]!;
   } catch (err: unknown) {
-    //Never leave the row in `waiting`: it would hold the partial index and lock the
-    //player out of retrying a charge that no invoice will ever settle.
+    //Safe to write off precisely because no invoice exists: nothing at BTCPay can ever
+    //be paid against this row. Leaving it `waiting` would hold the partial index and
+    //lock the player out of retrying.
     await query(
       `UPDATE payments SET status = 'failed', updated_at = now()
         WHERE order_id = $1 AND status = 'waiting'`,
@@ -121,10 +103,42 @@ export async function createPayment(playerId: string, sku: string): Promise<Paym
     enrich({ payment_gateway_error: err instanceof Error ? err.message : String(err) });
     throw new AppError(502, "createPayment: the payment gateway rejected the invoice", "gateway_error");
   }
+
+  //invoice_id lands before anything else can fail. It is the only handle the webhook has
+  //on this row, and the invoice is payable from the moment BTCPay returns it — a row
+  //without it would mean coins arriving that applyWebhook can never match to anyone.
+  await query(
+    `UPDATE payments
+        SET invoice_id = $2, checkout_link = $3, expires_at = $4, updated_at = now()
+      WHERE order_id = $1`,
+    //Greenfield reports expirationTime in unix seconds.
+    [orderId, invoice.id, invoice.checkoutLink, new Date(invoice.expirationTime * 1000).toISOString()]
+  );
+
+  const method = await onChainMethodFor(invoice.id);
+  const res = await query<PaymentRow>(
+    `UPDATE payments
+        SET amount_btc = $2, address = $3, bip21 = $4, updated_at = now()
+      WHERE order_id = $1
+      RETURNING *`,
+    [orderId, method?.amount ?? null, method?.destination ?? null, bip21From(method)]
+  );
+  const payment = res.rows[0];
+  if (!payment) {
+    throw new AppError(500, `createPayment: charge ${orderId} vanished while being opened`, "internal");
+  }
+  return payment;
 }
 
-/** The player's live charge, if any. Terminal ones are history, not state. */
+/**
+ * The player's live charge, if any. Terminal ones are history, not state.
+ *
+ * Sweeps first: without it a `waiting` charge whose BTCPay invoice expired long ago is
+ * still handed back as the one to resume, the client re-renders its QR, and coins sent to
+ * a dead invoice come back as `InvoiceInvalid` — paid, never credited.
+ */
 export async function activePaymentFor(playerId: string): Promise<PaymentRow | null> {
+  await expireStaleCharges(playerId);
   const res = await query<PaymentRow>(
     `SELECT * FROM payments
       WHERE player_id = $1 AND status IN ('waiting', 'confirming')
@@ -196,17 +210,34 @@ export async function applyWebhook(payload: BTCPayWebhookPayload): Promise<Payme
     gateway: GATEWAY,
     webhook_event: payload.type,
     webhook_redelivery: payload.isRedelivery,
-    payment_status: target,
+    payment_status_target: target,
+    //The only signal support ever gets that coins arrived but the charge did not settle.
+    //Without these an underpaid invoice is indistinguishable from one never paid at all.
+    payment_partially_paid: payload.partiallyPaid ?? false,
+    payment_over_paid: payload.overPaid ?? false,
   });
+  const applied = await applyTransition(target, payload.invoiceId);
+  //The status that actually landed, not the one we intended: a redelivery or an unknown
+  //invoice moves nothing, and logging the target would over-count settlements in exactly
+  //the queries this event exists to answer.
+  enrich({ payment_status: applied?.status ?? null, payment_applied: Boolean(applied) });
+  if (applied) { enrich({ payment_order_id: applied.order_id, sku: applied.sku }); }
+  return applied;
+}
+
+async function applyTransition(
+  target: PaymentStatus | null,
+  invoiceId: string
+): Promise<PaymentRow | null> {
   if (!target) { return null; }
-  if (target === "settled") { return settleAndCredit(payload.invoiceId); }
+  if (target === "settled") { return settleAndCredit(invoiceId); }
 
   const res = await query<PaymentRow>(
     `UPDATE payments
         SET status = $2, updated_at = now()
       WHERE invoice_id = $1 AND status <> ALL($3::text[])
       RETURNING *`,
-    [payload.invoiceId, target, TERMINAL_STATUSES]
+    [invoiceId, target, TERMINAL_STATUSES]
   );
   return res.rows[0] ?? null;
 }
@@ -271,13 +302,22 @@ async function settleAndCredit(invoiceId: string): Promise<PaymentRow | null> {
   });
 }
 
-//A charge that never reached the gateway, or that BTCPay let lapse without telling us,
-//would otherwise hold the partial index forever. One statement, no cron job.
-async function expireStaleCharges(playerId: string): Promise<void> {
+/**
+ * A charge that never reached the gateway, or that BTCPay let lapse without telling us,
+ * would otherwise hold the partial index forever. One statement, no cron job.
+ *
+ * `waiting` only — never `confirming`. A confirming charge has coins on the wire and
+ * BTCPay keeps watching it well past `expirationTime` (that is what `monitoringMinutes`
+ * is for), so expiring it here would free the index, let a second invoice open, and leave
+ * the player with two payable addresses for one plan. It is the same transition
+ * cancelPayment refuses with 409 `payment_in_flight`; doing it silently on another path
+ * would make that guard theatre.
+ */
+export async function expireStaleCharges(playerId: string): Promise<void> {
   await query(
     `UPDATE payments
         SET status = 'expired', updated_at = now()
-      WHERE player_id = $1 AND status IN ('waiting', 'confirming') AND expires_at < now()`,
+      WHERE player_id = $1 AND status = 'waiting' AND expires_at < now()`,
     [playerId]
   );
 }
@@ -305,24 +345,45 @@ async function insertWaitingCharge(
   }
 }
 
-//Prefer the on-chain BTC method: the checkout screen shows an address and a BIP21 QR,
-//which a Lightning method would not supply (its paymentLink is a bolt11 invoice).
-function onChainMethod(methods: BTCPayPaymentMethod[]): BTCPayPaymentMethod | undefined {
-  return methods.find((m) => m.paymentMethodId?.startsWith("BTC-CHAIN")) ?? methods[0];
+//Losing the QR is not fatal: the invoice exists and is payable, and checkout_link (BTCPay's
+//own hosted page) is the documented fallback. Failing the whole charge here would 502 a
+//charge the gateway has already opened.
+async function onChainMethodFor(invoiceId: string): Promise<BTCPayPaymentMethod | undefined> {
+  try {
+    return onChainMethod(await gateway().getPaymentMethods(invoiceId));
+  } catch (err: unknown) {
+    enrich({ payment_methods_error: err instanceof Error ? err.message : String(err) });
+    return undefined;
+  }
 }
 
-//Built on first use, not at import: config/BTCPayConfig throws when the credentials
-//are missing, and db/migrate.ts plus the test suites import domain code with no
-//gateway configured at all.
+//Deliberately no `?? methods[0]` fallback. On a Lightning-enabled store that would put a
+//bolt11 invoice in `address` and a `lightning:` URI in `bip21`, which the client renders as
+//an on-chain QR — wrong data is worse than no data, and checkout_link still works.
+//"BTC" is the older Greenfield id for on-chain, "BTC-CHAIN" the current one.
+export function onChainMethod(methods: BTCPayPaymentMethod[]): BTCPayPaymentMethod | undefined {
+  return methods.find((m) => m.paymentMethodId === "BTC-CHAIN" || m.paymentMethodId === "BTC");
+}
+
+//Second guard on the same contract: whatever the method id claimed, only a real BIP21 URI
+//reaches the client as one.
+function bip21From(method: BTCPayPaymentMethod | undefined): string | null {
+  const link = method?.paymentLink;
+  return link?.startsWith("bitcoin:") ? link : null;
+}
+
+//One source of truth for the credentials: http/routes/payments-webhook.ts hands them to
+//BTCPayConfiguration at wiring time and this reads them back, instead of both building a
+//client from `config` and drifting apart when a key rotates. getConfig() also validates the
+//three required fields for free.
+//
+//Built on first use, not at import: getConfig() throws when the credentials are missing,
+//and db/migrate.ts plus the test suites import domain code with no gateway configured.
 let client: BTCPayClient | null = null;
 
 function gateway(): BTCPayClient {
   if (!client) {
-    client = new BTCPayClient({
-      baseURL: config.btcpayBaseUrl,
-      apiKey: config.btcpayApiKey,
-      storeId: config.btcpayStoreId,
-    });
+    client = BTCPayClient.fromConfig(BTCPayConfiguration.getConfig());
   }
   return client;
 }
