@@ -28,6 +28,12 @@ Any other error from `createPayment` rethrows as-is (not swallowed into the 409)
 **`GET /payments/btcpay-server/active` returns 204, not `{payment: null}`** — "no
 charge in flight" is modeled as absence of a resource, not a null field.
 
+**Cancel only accepts a `waiting` charge.** `domain::cancelPayment` refuses a
+`confirming` one with 409 `payment_in_flight` (coins already on the wire) and an
+already-terminal one with 409 `payment_terminal`; 404 is reserved for an order id
+that does not exist for this player. The client shows "resume, don't discard" copy,
+but the refusal is the actual guard.
+
 **The address and the BTC amount never reach the wide event at all.**
 `enrichPayment()` in `payments.ts` carries order id, status, sku, credits and the USD
 amount, and deliberately omits `address` and `amount_btc` — together they name one

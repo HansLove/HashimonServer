@@ -123,6 +123,13 @@ once-only — BTCPay redelivers (`isRedelivery`), so a repeat is the normal case
 credit + `audit()` ride in one `withTransaction`. Same conditional-transition shape as
 `claimSelfCustody`.
 
+**Cancel is `waiting`-only, and settling ignores cancel.** `cancelPayment` refuses a
+`confirming` charge with 409 `payment_in_flight` — coins are already on the wire, so
+cancelling is a mistake every time. But `settleAndCredit` guards on `status <> 'settled'`,
+deliberately *not* on "not terminal": a charge the player cancelled, or that BTCPay let
+expire, still credits if the money lands. Never make bookkeeping the reason a real payment
+goes uncredited — `payments.test.ts` pins both halves.
+
 `createPayment` writes the ledger row **before** calling BTCPay, so a duplicate is
 rejected by the index without leaving an orphan invoice at the gateway; a gateway failure
 then marks the row `failed`, which also releases the index. That is why `invoice_id`,

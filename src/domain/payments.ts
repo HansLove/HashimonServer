@@ -144,19 +144,42 @@ export async function paymentByOrderId(orderId: string, playerId: string): Promi
   return res.rows[0] ?? null;
 }
 
-/** Give up on a charge. Only a live one can be cancelled — terminal is terminal. */
+/**
+ * Give up on a charge — only while it is still `waiting`.
+ *
+ * `confirming` means BTCPay has already seen coins on the wire, so cancelling there is
+ * a mistake every time: the player is about to pay for something they just told us to
+ * throw away. Refusing is a better safety net than a warning in the modal copy.
+ *
+ * It is not the *last* net, though — see settleAndCredit, whose guard is
+ * `status <> 'settled'` and not "not terminal". Money that actually arrives is credited
+ * even to a charge the player cancelled or that BTCPay let expire. Refusing to honour a
+ * real payment because of our own bookkeeping would be the worse bug.
+ */
 export async function cancelPayment(orderId: string, playerId: string): Promise<PaymentRow> {
   const res = await query<PaymentRow>(
     `UPDATE payments
         SET status = 'cancelled', updated_at = now()
-      WHERE order_id = $1 AND player_id = $2 AND status IN ('waiting', 'confirming')
+      WHERE order_id = $1 AND player_id = $2 AND status = 'waiting'
       RETURNING *`,
     [orderId, playerId]
   );
-  if (!res.rows[0]) {
-    throw new AppError(404, "cancelPayment: no live charge with that order id", "not_found");
+  if (res.rows[0]) { return res.rows[0]; }
+
+  //No row can mean two very different things, and a bare 404 would hide the one that
+  //matters: coins already in flight.
+  const existing = await paymentByOrderId(orderId, playerId);
+  if (!existing) {
+    throw new AppError(404, "cancelPayment: no charge with that order id", "not_found");
   }
-  return res.rows[0];
+  if (existing.status === "confirming") {
+    throw new AppError(
+      409,
+      "cancelPayment: this charge is already being paid — wait for it to settle",
+      "payment_in_flight"
+    );
+  }
+  throw new AppError(409, `cancelPayment: charge is already ${existing.status}`, "payment_terminal");
 }
 
 /**

@@ -109,7 +109,7 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | POST | `/payments/btcpay-server/invoice` | ✓ | open a charge from a `sku` — **409 `payment_pending`** if one is already live |
 | GET | `/payments/btcpay-server/active` | ✓ | the live charge, or **204** when there is none |
 | GET | `/payments/btcpay-server/invoice/:orderId` | ✓ | one charge — what the client polls |
-| POST | `/payments/btcpay-server/invoice/:orderId/cancel` | ✓ | give up on a live charge |
+| POST | `/payments/btcpay-server/invoice/:orderId/cancel` | ✓ | give up on a `waiting` charge — **409 `payment_in_flight`** once coins are on the wire |
 | POST | `/payments/btcpay-server/webhook` | HMAC | BTCPay callback — **401** on a bad signature |
 | GET | `/internal/luanti-auth` | secret | account list `{name, password, can_own}` for Luanti poll |
 | POST | `/internal/luanti-register` | secret | `{name, password}` → 201 guest row (in-game signup) |
@@ -222,6 +222,14 @@ Two guarantees live in SQL rather than in an `if` (`src/db/schema.sql`):
 - **credits granted exactly once** — `UPDATE … WHERE status <> 'settled' RETURNING *`.
   BTCPay redelivers webhooks (`isRedelivery`), so a repeat is the normal case; only the
   first update returns a row, and crediting rides in the same transaction as the audit entry.
+
+**Cancelling is only allowed while `waiting`.** Once the charge is `confirming` BTCPay has
+already seen coins, so a cancel there is a mistake every time — it is refused with 409
+`payment_in_flight` (an already-terminal charge gives 409 `payment_terminal`). That is not
+the last net, though: `settleAndCredit` guards on `status <> 'settled'`, *not* on "not
+terminal", so money that actually arrives is credited even to a charge the player cancelled
+or that BTCPay let expire. Refusing to honour a real payment over our own bookkeeping would
+be the worse bug.
 
 `payments` snapshots `sku`/`credits`/`amount_usd` when the charge opens. Raising a plan's
 price never revalues a charge already issued — the FK to `credits_plans` is referential

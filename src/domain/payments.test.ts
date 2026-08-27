@@ -1,8 +1,9 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { WebhookEventType, type BTCPayWebhookPayload } from "@taloon/btcpay-middleware";
-import { applyWebhook, statusForWebhookEvent } from "@/domain/payments";
+import { applyWebhook, cancelPayment, statusForWebhookEvent } from "@/domain/payments";
 import { pool, query } from "@/db/pool";
+import { AppError } from "@/http/errors";
 
 function webhookPayload(
   type: BTCPayWebhookPayload["type"],
@@ -114,6 +115,47 @@ describe("webhook application (against the local DB)", () => {
     );
     assert.equal(confirming?.status, "confirming");
     assert.equal(await creditsOf(playerId), 0);
+  });
+
+  // Cancelling a charge BTCPay is already collecting is a mistake every time: refusing
+  // it is a safety net the modal copy cannot be.
+  it("refuses to cancel a charge that is already confirming", async () => {
+    const invoiceId = uniqueInvoiceId();
+    const playerId = await seedWaitingCharge(invoiceId);
+    await applyWebhook(webhookPayload(WebhookEventType.INVOICE_RECEIVED_PAYMENT, invoiceId));
+
+    await assert.rejects(
+      cancelPayment(`credits-${invoiceId}`, playerId),
+      (err: unknown) => err instanceof AppError && err.code === "payment_in_flight"
+    );
+
+    const row = await query<{ status: string }>(`SELECT status FROM payments WHERE invoice_id = $1`, [invoiceId]);
+    assert.equal(row.rows[0]?.status, "confirming");
+  });
+
+  // The last net: bookkeeping must never be the reason real money goes uncredited.
+  it("still credits a cancelled charge if the coins land anyway", async () => {
+    const invoiceId = uniqueInvoiceId();
+    const playerId = await seedWaitingCharge(invoiceId);
+
+    const cancelled = await cancelPayment(`credits-${invoiceId}`, playerId);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(await creditsOf(playerId), 0);
+
+    const settled = await applyWebhook(webhookPayload(WebhookEventType.INVOICE_SETTLED, invoiceId));
+    assert.equal(settled?.status, "settled");
+    assert.equal(await creditsOf(playerId), 500);
+  });
+
+  it("refuses a second cancel once the charge is terminal", async () => {
+    const invoiceId = uniqueInvoiceId();
+    const playerId = await seedWaitingCharge(invoiceId);
+    await cancelPayment(`credits-${invoiceId}`, playerId);
+
+    await assert.rejects(
+      cancelPayment(`credits-${invoiceId}`, playerId),
+      (err: unknown) => err instanceof AppError && err.code === "payment_terminal"
+    );
   });
 
   it("does nothing for an invoice the ledger has never heard of", async () => {
