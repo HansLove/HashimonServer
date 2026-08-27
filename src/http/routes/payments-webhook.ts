@@ -5,6 +5,7 @@ import {
   type BTCPayWebhookPayload,
 } from "@taloon/btcpay-middleware";
 import { config } from "@/config";
+import { AppError, asyncHandler } from "@/http/errors";
 import { enrich } from "@/http/wide-event";
 import { applyWebhook, GATEWAY } from "@/domain/payments";
 
@@ -33,8 +34,23 @@ async function apply(payload: BTCPayWebhookPayload): Promise<void> {
 //Every event is registered, including the two that transition nothing: applyWebhook
 //owns the mapping, and routing the no-ops through it too puts them on the wide event
 //rather than dropping them silently.
+/**
+ * Refuse to serve the route at all without a secret. This is the whole security of the
+ * endpoint: `invoiceWebhook` verifies the HMAC only `if (config.webhookSecret)` — a blank
+ * BTCPAY_WEBHOOK_SECRET makes it accept any unsigned body, and since InvoiceSettled grants
+ * credits, that is an anonymous credit-minting endpoint. Nothing else fails when the
+ * variable is missing, so without this guard the hole is completely silent.
+ */
+const requireWebhookSecret = asyncHandler(async (_req, _res, next) => {
+  if (!config.btcpayWebhookSecret) {
+    throw new AppError(503, "BTCPAY_WEBHOOK_SECRET not configured", "misconfigured");
+  }
+  next();
+});
+
 paymentsWebhookRouter.post(
   "/payments/btcpay-server/webhook",
+  requireWebhookSecret,
   express.raw({ type: "application/json" }),
   BTCPayMiddleware.invoiceWebhook({
     onCreated: apply,
