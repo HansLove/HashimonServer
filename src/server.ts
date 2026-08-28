@@ -1,10 +1,16 @@
 import { createApp } from "@/http/app";
 import { config } from "@/config";
-import { pool } from "@/db/pool";
+import { pool, waitForDb } from "@/db/pool";
 import { logger } from "@/logger";
 
 const app = createApp();
 const startedAt = Date.now();
+
+try {
+  await waitForDb(logger);
+} catch {
+  process.exit(1);
+}
 
 const server = app.listen(config.port, () => {
   logger.info({ event: "server_start", port: config.port });

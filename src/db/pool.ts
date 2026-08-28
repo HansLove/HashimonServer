@@ -1,4 +1,5 @@
 import pg from "pg";
+import type pino from "pino";
 import { config } from "@/config";
 import { elapsedMs, trackDbQuery } from "@/http/wide-event";
 
@@ -7,7 +8,28 @@ import { elapsedMs, trackDbQuery } from "@/http/wide-event";
 //realistic values, so parse them — but see toSafeInt in domain code for the guard.
 pg.types.setTypeParser(20, (v) => Number(v)); //OID 20 = int8
 
-export const pool = new pg.Pool({ connectionString: config.databaseUrl });
+export const pool = new pg.Pool({ connectionString: config.databaseUrl, connectionTimeoutMillis: 5_000 });
+
+const DB_CONNECT_MAX_ATTEMPTS = 10;
+const DB_CONNECT_RETRY_DELAY_MS = 3_000;
+
+export async function waitForDb(logger: pino.Logger): Promise<void> {
+  for (let attempt = 1; attempt <= DB_CONNECT_MAX_ATTEMPTS; attempt++) {
+    try {
+      await pool.query("SELECT 1");
+      logger.info({ event: "db_connected", attempt });
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt === DB_CONNECT_MAX_ATTEMPTS) {
+        logger.error({ event: "db_connect_failed", attempt, max_attempts: DB_CONNECT_MAX_ATTEMPTS, error: message });
+        throw new Error(`waitForDb: could not reach the database after ${DB_CONNECT_MAX_ATTEMPTS} attempts: ${message}`);
+      }
+      logger.warn({ event: "db_connect_retry", attempt, max_attempts: DB_CONNECT_MAX_ATTEMPTS, error: message });
+      await new Promise((resolve) => setTimeout(resolve, DB_CONNECT_RETRY_DELAY_MS));
+    }
+  }
+}
 
 export type Sql = pg.Pool | pg.PoolClient;
 
