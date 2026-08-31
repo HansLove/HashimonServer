@@ -26,6 +26,11 @@ const REDACT_PATHS = [
   "public_key",
   "publicKey",
   "btcNodeUrl",
+  "caosApiKey",
+  //A lot's webhook secret IS its credential — CaosEngine does not sign deliveries.
+  "webhook_secret",
+  "webhookSecret",
+  "lotSecret",
   "*.token",
   "*.password",
   "*.password_hash",
@@ -37,6 +42,10 @@ const REDACT_PATHS = [
   "*.public_key",
   "*.publicKey",
   "*.btcNodeUrl",
+  "*.caosApiKey",
+  "*.webhook_secret",
+  "*.webhookSecret",
+  "*.lotSecret",
   "*.authorization",
   '*["x-luanti-secret"]',
 ];

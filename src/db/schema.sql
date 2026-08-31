@@ -169,6 +169,103 @@ CREATE TABLE IF NOT EXISTS submitted_shares (
   created_at      timestamptz NOT NULL DEFAULT now()
 );
 
+-- ---------------------------------------------------------------------------
+-- Assisted incubation: buying high-entropy marks from CaosEngine.
+--
+-- The volume ladder. Like credits_plans, the server fixes the price and the client
+-- sends a count, never an amount. Keyed by its lower bound so the seed below is
+-- idempotent without a surrogate id. There is deliberately no `active` flag: a tier
+-- is a segment of a continuous ladder, so switching one off would leave a hole that
+-- quotes nothing — retiring a tier means widening its neighbours, in one UPDATE.
+CREATE TABLE IF NOT EXISTS caos_pricing (
+  min_shares        integer PRIMARY KEY,
+  max_shares        integer NOT NULL,
+  credits_per_share numeric(10,2) NOT NULL CHECK (credits_per_share > 0),
+  discount_pct      numeric(4,2) NOT NULL DEFAULT 0 CHECK (discount_pct >= 0 AND discount_pct <= 5),
+  CHECK (max_shares >= min_shares)
+);
+
+-- Provisional seed (product decision P5: 5% is the cap). DO NOTHING keeps migrate
+-- idempotent and stops a redeploy from reverting a price edited in production.
+INSERT INTO caos_pricing (min_shares, max_shares, credits_per_share, discount_pct) VALUES
+  ( 1,  9, 10.00, 0.00),
+  (10, 24, 10.00, 2.00),
+  (25, 49, 10.00, 3.50),
+  (50, 50, 10.00, 5.00)
+ON CONFLICT (min_shares) DO NOTHING;
+
+-- The lot ledger — the second and only other path by which players.credits moves.
+-- Seven states, all server-decided:
+--   queued → assigned → mining → complete | partial | failed | expired
+-- The client runs no state machine; the phase of its UI *is* this column, exactly
+-- like payments.status.
+--
+-- credits_charged is a SNAPSHOT of what the player actually paid. A refund is
+-- proportional to it (undelivered/requested), never a re-quote — repricing the
+-- ladder must not revalue a lot already sold. Same discipline as payments.
+--
+-- webhook_secret is the whole authentication story for the inbound callback:
+-- CaosEngine does not sign its deliveries, so the lot's URL is its own credential.
+-- assigned_at is when the one-hour clock starts (P9) — NOT created_at: a healthy lot
+-- waiting in CaosEngine's queue must never refund itself for being queued.
+CREATE TABLE IF NOT EXISTS caos_lots (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  hashimon_id       uuid NOT NULL REFERENCES hashimons(id) ON DELETE CASCADE,
+  owner_id          uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  shares_requested  integer NOT NULL CHECK (shares_requested BETWEEN 1 AND 50),
+  shares_delivered  integer NOT NULL DEFAULT 0,
+  credits_charged   bigint NOT NULL CHECK (credits_charged >= 0),
+  credits_refunded  bigint NOT NULL DEFAULT 0 CHECK (credits_refunded >= 0),
+  stars_before      integer NOT NULL,
+  best_bits         integer,
+  status            text NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued','assigned','mining','complete','partial','failed','expired')),
+  caos_request_id   text,
+  webhook_secret    text NOT NULL,
+  btc_address       text NOT NULL,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  assigned_at       timestamptz,
+  closed_at         timestamptz
+);
+CREATE INDEX IF NOT EXISTS caos_lots_owner_idx ON caos_lots(owner_id);
+CREATE INDEX IF NOT EXISTS caos_lots_hashimon_idx ON caos_lots(hashimon_id);
+
+-- Idempotency as an index, not an `if` — same shape as payments_active_per_player_idx.
+-- One live lot per PLAYER, which is stricter than P11's one-per-creature and therefore
+-- subsumes it: a second creature of the same owner cannot get a lot either. A second
+-- concurrent POST gets 23505, which the route turns into 409 incubation_pending with the
+-- live lot in the body. Deliberately no separate per-hashimon index: it could never fire.
+CREATE UNIQUE INDEX IF NOT EXISTS caos_lots_active_per_player_idx
+  ON caos_lots (owner_id) WHERE status IN ('queued', 'assigned', 'mining');
+
+-- The webhook addresses a lot by its secret; CaosEngine echoes its own batch id back.
+CREATE UNIQUE INDEX IF NOT EXISTS caos_lots_secret_idx ON caos_lots (webhook_secret);
+CREATE UNIQUE INDEX IF NOT EXISTS caos_lots_request_idx
+  ON caos_lots (caos_request_id) WHERE caos_request_id IS NOT NULL;
+
+-- Provenance of every accepted share, recorded from day one even though the creature
+-- sheet never shows it (product decision P17/§7: stars are mined, not bought — a bought
+-- share is as real as a browser one). Adding the column now is trivial; reconstructing
+-- it in a year is impossible, and it is exactly the field a pay-to-win argument, a
+-- separate ranking or an audit would need.
+ALTER TABLE submitted_shares ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'browser';
+ALTER TABLE submitted_shares ADD COLUMN IF NOT EXISTS caos_lot_id uuid REFERENCES caos_lots(id) ON DELETE SET NULL;
+ALTER TABLE submitted_shares ADD COLUMN IF NOT EXISTS share_index integer;
+
+-- A CaosEngine share has no mining_jobs row behind it and its extranonce2 is an
+-- 8-byte pool counter, not this table's bigint: both are null for origin='caos'.
+-- The full template snapshot of the share that mattered lives on
+-- hashimons.best_share_bitcoin, which is what present() re-verifies.
+ALTER TABLE submitted_shares ALTER COLUMN job_id DROP NOT NULL;
+ALTER TABLE submitted_shares ALTER COLUMN extranonce2 DROP NOT NULL;
+
+-- CaosEngine redelivers; a repeat is the normal case, not an error. The share hash is
+-- already the table's PK (global dedupe), and this closes the other door: the same
+-- position in the same lot can only ever be counted once, even if the pool sends two
+-- different hashes for it.
+CREATE UNIQUE INDEX IF NOT EXISTS submitted_shares_lot_index_idx
+  ON submitted_shares (caos_lot_id, share_index) WHERE caos_lot_id IS NOT NULL;
+
 -- The credit catalogue. The server fixes the price: a client sends a sku, never an
 -- amount. Changing a price is an UPDATE, not a deploy. No admin CRUD yet — plans are
 -- edited by SQL until an administration surface exists.

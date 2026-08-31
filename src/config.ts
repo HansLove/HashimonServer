@@ -85,4 +85,18 @@ export const config = {
   btcpayApiKey: process.env.BTCPAY_API_KEY ?? "",
   btcpayStoreId: process.env.BTCPAY_STORE_ID ?? "",
   btcpayWebhookSecret: process.env.BTCPAY_WEBHOOK_SECRET ?? "",
+  // CaosEngine — assisted incubation. Empty base URL means the /incubation routes answer
+  // 503 instead of charging credits for a lot nobody will ever mine.
+  caosEngineUrl: process.env.CAOS_ENGINE_URL ?? "",
+  // Not read by CaosEngine today (its auth guards are commented out on that side) — kept
+  // so turning them on is an env change here, not a deploy. A secret: never log it.
+  caosApiKey: process.env.CAOS_API_KEY ?? "",
+  // Absolute, PUBLICLY REACHABLE base URL of this server. It is what a lot's webhook URL
+  // is built from, so CaosEngine can only deliver shares if this resolves from its host —
+  // localhost is fine only when both run on the same machine.
+  publicUrl: process.env.HASHIMON_PUBLIC_URL ?? "",
+  // P9: one hour, counted from ASSIGNMENT, not from payment. The longest lot (50 marks)
+  // takes ~6 minutes, so this is 10x the worst case — past it the miner is genuinely
+  // hung and the lot refunds in full, unprompted.
+  incubationLotTimeoutMs: Number(process.env.INCUBATION_LOT_TIMEOUT_MS ?? 3_600_000),
 } as const;
