@@ -230,6 +230,12 @@ CREATE TABLE IF NOT EXISTS caos_lots (
 CREATE INDEX IF NOT EXISTS caos_lots_owner_idx ON caos_lots(owner_id);
 CREATE INDEX IF NOT EXISTS caos_lots_hashimon_idx ON caos_lots(hashimon_id);
 
+-- Which position in the lot produced best_bits, so the client can point at the mark that
+-- mutated the creature instead of only naming the outcome. 0-based; null until the first
+-- mark lands. Ties keep the earlier mark: the first one to reach that height is the one
+-- that did it.
+ALTER TABLE caos_lots ADD COLUMN IF NOT EXISTS best_share_index integer;
+
 -- Idempotency as an index, not an `if` — same shape as payments_active_per_player_idx.
 -- One live lot per PLAYER, which is stricter than P11's one-per-creature and therefore
 -- subsumes it: a second creature of the same owner cannot get a lot either. A second

@@ -65,6 +65,7 @@ export interface LotRow {
   credits_refunded: number;
   stars_before: number;
   best_bits: number | null;
+  best_share_index: number | null;
   status: LotStatus;
   caos_request_id: string | null;
   webhook_secret: string;
@@ -86,6 +87,8 @@ export function presentLot(row: LotRow) {
     creditsRefunded: row.credits_refunded,
     starsBefore: row.stars_before,
     bestStars,
+    //Which mark got there, so the client can point at it rather than only name the result.
+    bestShareIndex: row.best_share_index,
     //Stars, not bits: a mark can raise the record without raising the star count, and to the
     //player that is not a mutation. Announcing one that isn't visible would read as a lie.
     mutated: bestStars > row.stars_before,
@@ -501,12 +504,15 @@ export async function applyShare(lot: LotRow, payload: CaosSharePayload): Promis
       `UPDATE caos_lots SET
          shares_delivered = shares_delivered + 1,
          best_bits = GREATEST(COALESCE(best_bits, 0), $2),
+         -- Strictly greater, and against -1 so the very first mark always claims the slot:
+         -- on a tie the earlier mark keeps it, because it is the one that got there first.
+         best_share_index = CASE WHEN $2 > COALESCE(best_bits, -1) THEN $3 ELSE best_share_index END,
          assigned_at = COALESCE(assigned_at, now()),
          status = CASE WHEN shares_delivered + 1 >= shares_requested THEN 'complete' ELSE 'mining' END,
          closed_at = CASE WHEN shares_delivered + 1 >= shares_requested THEN now() ELSE closed_at END
        WHERE id = $1
        RETURNING *`,
-      [lot.id, verdict.bits],
+      [lot.id, verdict.bits, payload.shareIndex],
       client
     );
     const lotAfter = updated.rows[0]!;

@@ -226,6 +226,8 @@ describe("the lot ledger (against the local DB)", () => {
     assert.ok(applied.ok && !applied.duplicate && applied.isNewBest);
     assert.ok(applied.ok && !applied.duplicate && applied.lot.status === "complete");
     assert.ok(applied.ok && !applied.duplicate && applied.lot.shares_delivered === 1);
+    //The first mark always claims the best slot, so the client can point at it.
+    assert.ok(applied.ok && !applied.duplicate && applied.lot.best_share_index === 0);
 
     //The creature carries the mark, and present() re-derives it without trusting the row.
     const row = await query(`SELECT * FROM hashimons WHERE id = $1`, [hashimonId]);

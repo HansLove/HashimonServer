@@ -13,6 +13,8 @@ import { walletRouter } from "@/http/routes/wallet";
 import { magiRouter } from "@/http/routes/magi";
 import { paymentsRouter } from "@/http/routes/payments";
 import { paymentsWebhookRouter } from "@/http/routes/payments-webhook";
+import { incubationRouter } from "@/http/routes/incubation";
+import { incubationWebhookRouter } from "@/http/routes/incubation-webhook";
 import { errorMiddleware } from "@/http/errors";
 import { wideEventMiddleware } from "@/http/wide-event";
 
@@ -48,6 +50,10 @@ export function createApp(logger?: Logger) {
   app.use(walletRouter);
   app.use(magiRouter);
   app.use(paymentsRouter);
+  app.use(incubationRouter);
+  //After express.json(), unlike the BTCPay one: CaosEngine does not sign its deliveries,
+  //so there are no raw bytes to preserve — the lot secret in the URL is the credential.
+  app.use(incubationWebhookRouter);
   app.use(internalRouter);
 
   app.use((_req, res) => {
