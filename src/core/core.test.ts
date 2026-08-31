@@ -15,6 +15,8 @@ import {
   verifyJobShare,
   emptyPow,
   hashBitcoinJob,
+  stratumPrevHashToBE,
+  reverseHex,
   type PowRecord,
   type MiningJobRecord,
   type BitcoinShareSnapshot,
@@ -131,7 +133,8 @@ test("verifyStoredPow accepts bitcoin share and rejects a tampered template", ()
     prevhashBE: "00".repeat(32),
     versionHex: "20000000",
     bits: "1d00ffff",
-    merkleBranch: ["11".repeat(32), "22".repeat(32)],
+    //Deliberately not palindromic: a palindromic branch hides any byte-order slip in the fold.
+    merkleBranch: ["0123456789abcdef".repeat(4), "fedcba9876543210".repeat(4)],
     coinbasePrefix: "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff08",
     coinbaseSuffix: "ffffffff0100f2052a010000000000000000",
     extranonce2Size: 4,
@@ -156,6 +159,107 @@ test("verifyStoredPow accepts bitcoin share and rejects a tampered template", ()
 
   const tampered: PowRecord = { ...pow, bestShareBitcoin: { ...snapshot, bits: "1d00fffe" } };
   assert.equal(verifyStoredPow(TEST_DNA, tampered).status, "mismatch");
+});
+
+//The share round-trip above can only prove hashBitcoinJob agrees with itself. This vector
+//comes from OUTSIDE — spoon's own SharePayload, hash included — so it is the only thing that
+//pins the header's byte order: merkle branch folded raw, root raw, prevhash word-swabbed.
+const SPOON_GOLDEN_VECTOR = {
+  version: "20000000",
+  nonce: 0,
+  hash: "1930020f0a37e2537eb27e480920ab83d111b577f98b4493bef3b100e7603ed5",
+  merkleRoot: "dbbf6aff5612cae443b99cd8adc8ef8ffeea08e0c8ab4d9946d52cda630f0159",
+  prevHash: "1c1d1e1f18191a1b14151617101112130c0d0e0f08090a0b0405060700010203",
+  bits: "170e2632",
+  timestamp: 1787944556,
+  opReturn: "48415348494d4f4e2d444e412d474f4c44454e2d564543544f522d30303031",
+  coinbasePrefix:
+    "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff1a0372c00d0553504f4f4e",
+  coinbaseSuffix:
+    "ffffffff03205fa01200000000160014751e76e8199196d454941c45d1b3a323f1433bd60000000000000000216a1f48415348494d4f4e2d444e412d474f4c44454e2d564543544f522d303030310000000000000000266a24aa21a9ed000000000000000000000000000000000000000000000000000000000000000000000000",
+  extranonce1: "0000000000000001",
+  extranonce2: "0000000000000042",
+  extranonce2Size: 8,
+  //The first branch is 30 bytes — a synthetic fixture. Nothing here may assume 32.
+  merkleBranch: [
+    "313131313131313131313131313131313131313131313131313173696231",
+    "0e6085fc097e1e76eefeae3c5f88f0f8bfa629b40c6730bb2999cb4ede703e3e",
+  ],
+} as const;
+
+//What domain/incubation.ts does to turn a spoon SharePayload into a snapshot. Kept here
+//verbatim so the vector guards the adaptation, not just the hashing.
+function spoonSnapshot(): BitcoinShareSnapshot {
+  const v = SPOON_GOLDEN_VECTOR;
+  return {
+    prevhashBE: stratumPrevHashToBE(v.prevHash),
+    versionHex: v.version,
+    //Already version-rolled by spoon (BIP310) — rolling it again would corrupt the header.
+    versionBits: null,
+    bits: v.bits,
+    merkleBranch: [...v.merkleBranch],
+    coinbasePrefix: v.coinbasePrefix,
+    coinbaseSuffix: v.coinbaseSuffix,
+    extranonce2Size: v.extranonce2Size,
+    extranonce1: v.extranonce1,
+    extranonce2: v.extranonce2,
+    nTimeHex: v.timestamp.toString(16).padStart(8, "0"),
+  };
+}
+
+test("hashBitcoinJob reproduces spoon's own share hash (external golden vector)", () => {
+  const v = SPOON_GOLDEN_VECTOR;
+  const { hashBE } = hashBitcoinJob({
+    ...spoonSnapshot(),
+    extranonce1: v.extranonce1,
+    extranonce2: v.extranonce2,
+    nonceHex: v.nonce.toString(16).padStart(8, "0"),
+  });
+  assert.equal(hashBE, v.hash);
+});
+
+test("stratumPrevHashToBE undoes the word swab", () => {
+  const swabbed = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
+  //Round-trip: the header field is the swab of what spoon sends, and BE is its reverse.
+  assert.equal(
+    reverseHex(stratumPrevHashToBE(SPOON_GOLDEN_VECTOR.prevHash)),
+    swabbed.slice(0, 64),
+  );
+  assert.equal(stratumPrevHashToBE(stratumPrevHashToBE(SPOON_GOLDEN_VECTOR.prevHash)), SPOON_GOLDEN_VECTOR.prevHash);
+});
+
+test("verifyStoredPow re-verifies an outside pool's share from its own extranonces", () => {
+  const v = SPOON_GOLDEN_VECTOR;
+  const pow: PowRecord = {
+    ...emptyPow(),
+    bestShareBits: leadingZeroBits(v.hash),
+    bestShareHash: v.hash,
+    bestShareNonce: v.nonce,
+    //No bestShareExtranonce2: a caos share's extranonces live on the snapshot, not on the DNA.
+    bestShareExtranonce2: null,
+    bestShareBitcoin: spoonSnapshot(),
+  };
+  assert.equal(verifyStoredPow(TEST_DNA, pow).status, "ok");
+
+  //A forged hash must not survive, even though the snapshot is genuine.
+  const forged: PowRecord = { ...pow, bestShareHash: "00".repeat(32) };
+  assert.equal(verifyStoredPow(TEST_DNA, forged).status, "mismatch");
+
+  //Nor may a snapshot be tampered with to claim a different template.
+  const tampered: PowRecord = {
+    ...pow,
+    bestShareBitcoin: { ...spoonSnapshot(), merkleBranch: [v.merkleBranch[1]!, v.merkleBranch[0]!] },
+  };
+  assert.equal(verifyStoredPow(TEST_DNA, tampered).status, "mismatch");
+});
+
+test("the coinbase carries the OP_RETURN the lot asked for", () => {
+  const v = SPOON_GOLDEN_VECTOR;
+  //The DNA commitment lives in the coinbase, which is what the merkle root commits to — this
+  //is the link that makes a bought share provably that creature's and no other's.
+  const coinbase = v.coinbasePrefix + v.extranonce1 + v.extranonce2 + v.coinbaseSuffix;
+  const pushed = `6a${(v.opReturn.length / 2).toString(16).padStart(2, "0")}${v.opReturn}`;
+  assert.ok(coinbase.includes(pushed), "coinbase must contain OP_RETURN <len> <dna>");
 });
 
 function boundJob(): MiningJobRecord {
