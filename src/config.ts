@@ -98,5 +98,10 @@ export const config = {
   // P9: one hour, counted from ASSIGNMENT, not from payment. The longest lot (50 marks)
   // takes ~6 minutes, so this is 10x the worst case — past it the miner is genuinely
   // hung and the lot refunds in full, unprompted.
-  incubationLotTimeoutMs: Number(process.env.INCUBATION_LOT_TIMEOUT_MS ?? 3_600_000),
+  // `||`, not `??`: an unset variable is not the only way this arrives empty — an Ansible
+  // template that rendered nothing, or a blank line in .env, both give "" here, and
+  // Number("") is 0. A zero timeout expires and refunds every lot the instant it is
+  // assigned, while the pool keeps mining a batch nobody will ever collect; a non-numeric
+  // value gives NaN, which reaches Postgres as 'NaN milliseconds' and 500s every read.
+  incubationLotTimeoutMs: Number(process.env.INCUBATION_LOT_TIMEOUT_MS) || 3_600_000,
 } as const;
