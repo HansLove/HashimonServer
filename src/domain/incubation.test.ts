@@ -16,7 +16,7 @@ import {
   type CaosSharePayload,
   type LotRow,
 } from "@/domain/incubation";
-import { hashBitcoinJob } from "@/core/index";
+import { hashBitcoinJob, leadingZeroBits } from "@/core/index";
 import { present } from "@/domain/hashimons";
 import { pool, query } from "@/db/pool";
 import { AppError } from "@/http/errors";
@@ -75,6 +75,19 @@ function minedShare(nonce: number, overrides: Partial<CaosSharePayload> = {}): C
   return { ...base, hash: hashBE };
 }
 
+//The synthetic vector lands on 3 bits and a star costs 4, so a mark that moves the star
+//count has to be ground for — which is what the pool does for real. A single star is ~16
+//tries here, and grinding it beats asserting against a hand-written hash.
+function markWorthStars(stars: number, from = 1): CaosSharePayload {
+  for (let nonce = from; nonce < from + 100_000; nonce += 1) {
+    const share = minedShare(nonce);
+    if (leadingZeroBits(share.hash) >= stars * 4) {
+      return share;
+    }
+  }
+  throw new Error(`markWorthStars: no nonce from ${from} reached ${stars} stars`);
+}
+
 describe("the price ladder", () => {
   //The four numbers the product ladder documents. If these drift, someone repriced the
   //product by accident — the seed is the contract, not an implementation detail.
@@ -127,6 +140,11 @@ describe("closing vocabulary", () => {
     //Delivery is the ground truth, not the label: a full delivery is complete whatever
     //word the pool used for it.
     assert.equal(statusForTermination("partial", 10, 10), "complete");
+    //And the label cannot promote a lot either. A batch CaosEngine calls completed whose
+    //marks did not all arrive owes a refund, and a complete lot that owes money is a
+    //contradiction the client would render as a success screen.
+    assert.equal(statusForTermination("completed", 3, 10), "partial");
+    assert.equal(statusForTermination("completed", 0, 10), "failed");
   });
 });
 
@@ -391,6 +409,42 @@ describe("the lot ledger (against the local DB)", () => {
     //different questions, and this mark is the best THIS lot delivered.
     assert.ok(applied.ok && !applied.duplicate && applied.lot.best_bits !== null);
     assert.ok(applied.ok && !applied.duplicate && applied.lot.best_bits! < 20);
+  });
+
+  //`mutación` is the one word the player-facing vocabulary does not allow to be approximate.
+  //stars_before is frozen when the lot opens, so a player who keeps incubating in the
+  //browser meanwhile leaves it behind — and a mark that beats the STALE number while losing
+  //to the creature's real record would announce a mutation that never happened.
+  it("does not claim a mutation for a mark the creature had already beaten", async () => {
+    const { hashimonId, lot } = await openLot(1, 500, committedDna(4));
+    assert.equal(lot.stars_before, 0);
+    //The player's own incubating, while the lot is in flight: 5 stars, out of the lot's view.
+    await query(`UPDATE hashimons SET best_share_bits = 20 WHERE id = $1`, [hashimonId]);
+
+    //Worth a star — more than the lot's frozen snapshot, less than the creature now holds.
+    const applied = await applyShare(lot, markWorthStars(1));
+    assert.ok(applied.ok && !applied.duplicate && applied.isNewBest === false);
+    assert.equal(presentLot(applied.ok && !applied.duplicate ? applied.lot : lot).mutated, false);
+
+    //And the creature really is untouched, which is what makes the answer the honest one.
+    const after = await query<{ best_share_bits: number }>(
+      `SELECT best_share_bits FROM hashimons WHERE id = $1`,
+      [hashimonId]
+    );
+    assert.equal(after.rows[0]!.best_share_bits, 20);
+  });
+
+  it("reports the mutation when a mark actually raises the star count", async () => {
+    const { hashimonId, lot } = await openLot(1, 500, committedDna(6));
+    const applied = await applyShare(lot, markWorthStars(1, 50_000));
+    assert.ok(applied.ok && !applied.duplicate && applied.isNewBest === true);
+    assert.equal(presentLot(applied.ok && !applied.duplicate ? applied.lot : lot).mutated, true);
+
+    const after = await query<{ best_share_bits: number }>(
+      `SELECT best_share_bits FROM hashimons WHERE id = $1`,
+      [hashimonId]
+    );
+    assert.ok(after.rows[0]!.best_share_bits >= 4);
   });
 
   it("refunds the undelivered marks on a partial close, exactly once", async () => {

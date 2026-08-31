@@ -67,6 +67,7 @@ export interface LotRow {
   stars_before: number;
   stars_requested: number;
   best_bits: number | null;
+  mutated: boolean;
   best_share_index: number | null;
   status: LotStatus;
   caos_request_id: string | null;
@@ -91,9 +92,11 @@ export function presentLot(row: LotRow) {
     bestStars,
     //Which mark got there, so the client can point at it rather than only name the result.
     bestShareIndex: row.best_share_index,
-    //Stars, not bits: a mark can raise the record without raising the star count, and to the
-    //player that is not a mutation. Announcing one that isn't visible would read as a lie.
-    mutated: bestStars > row.stars_before,
+    //Recorded by the mark that did it, never inferred here. Stars, not bits: a mark can raise
+    //the record without raising the star count, and to the player that is not a mutation.
+    //Announcing one that isn't visible would read as a lie — and `mutación` is the one word
+    //the vocabulary rules do not allow to be approximate.
+    mutated: row.mutated,
     createdAt: row.created_at.toISOString(),
     assignedAt: row.assigned_at ? row.assigned_at.toISOString() : null,
     closedAt: row.closed_at ? row.closed_at.toISOString() : null,
@@ -477,23 +480,8 @@ export async function applyShare(lot: LotRow, payload: CaosSharePayload): Promis
     return { ok: false, error: "request_mismatch" };
   }
 
-  const creature = await query<{ id: string; dna: string; best_share_bits: number }>(
-    `SELECT id, dna, best_share_bits FROM hashimons WHERE id = $1`,
-    [lot.hashimon_id]
-  );
-  const row = creature.rows[0];
-  if (!row) {
-    return { ok: false, error: "hashimon_gone" };
-  }
-
-  const verdict = verifyShare(payload, row.dna, lot.stars_requested * BITS_PER_STAR);
-  if (!verdict.ok) {
-    enrich({ share_reject_reason: verdict.error, lot_id: lot.id });
-    return { ok: false, error: verdict.error };
-  }
-
   try {
-    return await applyVerifiedShare(lot, payload, row, verdict);
+    return await applyVerifiedShare(lot, payload);
   } catch (err: unknown) {
     if (err instanceof LotClosedDuringApply) {
       enrich({ share_reject_reason: "lot_closed", lot_id: lot.id });
@@ -508,13 +496,28 @@ export async function applyShare(lot: LotRow, payload: CaosSharePayload): Promis
  *  refusal on that webhook — it is a decision, not a delivery failure. */
 class LotClosedDuringApply extends Error {}
 
-async function applyVerifiedShare(
-  lot: LotRow,
-  payload: CaosSharePayload,
-  row: { id: string; dna: string; best_share_bits: number },
-  verdict: Extract<ShareVerdict, { ok: true }>
-): Promise<ApplyShareResult> {
+async function applyVerifiedShare(lot: LotRow, payload: CaosSharePayload): Promise<ApplyShareResult> {
   return withTransaction(async (client: DbClient) => {
+    //FOR UPDATE, and inside the transaction: the star count before and after have to come
+    //from the same view of the row, or a player browser-incubating on this very creature can
+    //slip a mutation in between the two reads and make the lot claim — or miss — one.
+    //Verification runs under the lock; it is a handful of hashes, not a round trip.
+    const creature = await query<{ id: string; dna: string; best_share_bits: number }>(
+      `SELECT id, dna, best_share_bits FROM hashimons WHERE id = $1 FOR UPDATE`,
+      [lot.hashimon_id],
+      client
+    );
+    const row = creature.rows[0];
+    if (!row) {
+      return { ok: false as const, error: "hashimon_gone" };
+    }
+
+    const verdict = verifyShare(payload, row.dna, lot.stars_requested * BITS_PER_STAR);
+    if (!verdict.ok) {
+      enrich({ share_reject_reason: verdict.error, lot_id: lot.id });
+      return { ok: false as const, error: verdict.error };
+    }
+
     //ON CONFLICT DO NOTHING over BOTH doors: the global hash PK, and this lot's position.
     //An empty result means we have already counted this mark — say so and change nothing.
     const inserted = await query(
@@ -553,6 +556,12 @@ async function applyVerifiedShare(
     //global, so no earlier mark on any creature can be carrying it.
     const isNewBest = bested.rows[0]?.is_new_best === true;
 
+    //What the player is actually told happened. The record moving is not enough — four bits
+    //buy one star, so most new records are invisible on the creature sheet.
+    const mutated =
+      isNewBest &&
+      progressionFromBits(verdict.bits).stars > progressionFromBits(row.best_share_bits).stars;
+
     //The lot closes itself the moment the last mark lands. Waiting for CaosEngine's closing
     //event would leave a finished lot sitting in `mining`, blocking the player's next one.
     const updated = await query<LotRow>(
@@ -563,11 +572,14 @@ async function applyVerifiedShare(
          -- on a tie the earlier mark keeps it, because it is the one that got there first.
          best_share_index = CASE WHEN $2 > COALESCE(best_bits, -1) THEN $3 ELSE best_share_index END,
          assigned_at = COALESCE(assigned_at, now()),
+         -- Sticky: one mark that moved the star count is what the lot reports, whether or
+         -- not the forty after it do anything.
+         mutated = mutated OR $5,
          status = CASE WHEN shares_delivered + 1 >= shares_requested THEN 'complete' ELSE 'mining' END,
          closed_at = CASE WHEN shares_delivered + 1 >= shares_requested THEN now() ELSE closed_at END
        WHERE id = $1 AND status = ANY($4::text[])
        RETURNING *`,
-      [lot.id, verdict.bits, payload.shareIndex, LIVE_STATUSES],
+      [lot.id, verdict.bits, payload.shareIndex, LIVE_STATUSES, mutated],
       client
     );
     //The live check at the top of this function read a row that a stale sweep or a closing
@@ -590,14 +602,36 @@ async function applyVerifiedShare(
         bits: verdict.bits,
         hash: payload.hash,
         isNewBest,
+        mutated,
       },
     });
+
+    //A lot that fills up closes right here, without ever reaching closeLotById — so without
+    //this the ledger would carry a lot_opened for every lot and a lot_closed only for the
+    //ones that went wrong. Reconstructing a disputed lot needs both ends of it.
+    if (lotAfter.status === "complete") {
+      await audit(client, {
+        playerId: lot.owner_id,
+        hashimonId: row.id,
+        action: "incubation.lot_closed",
+        detail: {
+          lotId: lot.id,
+          status: lotAfter.status,
+          reason: "last_mark_delivered",
+          sharesRequested: lotAfter.shares_requested,
+          sharesDelivered: lotAfter.shares_delivered,
+          creditsCharged: lotAfter.credits_charged,
+          creditsRefunded: 0,
+        },
+      });
+    }
     enrich({
       lot_id: lot.id,
       lot_status: lotAfter.status,
       share_index: payload.shareIndex,
       share_bits: verdict.bits,
       share_is_new_best: isNewBest,
+      share_mutated: mutated,
       shares_delivered: lotAfter.shares_delivered,
     });
 
@@ -679,12 +713,25 @@ export async function closeLotById(
   });
 }
 
-/** CaosEngine's closing event vocabulary → ours. Anything unknown is a failure, not a silent drop. */
+/**
+ * CaosEngine's closing event vocabulary → ours. Anything unknown is a failure, not a silent drop.
+ *
+ * The ledger's delivery count decides, and CaosEngine's label can only ever agree with it or
+ * lower it. A batch it considers `completed` whose marks did not all reach us — three webhook
+ * retries exhausted is enough — is a `partial` here, because the refund is computed from the
+ * same count and a lot cannot be complete and owe money back at the same time. The player's
+ * whole UI phase is this column.
+ */
 export function statusForTermination(caosStatus: string, delivered: number, requested: number): Extract<LotStatus, "complete" | "partial" | "failed"> {
-  if (caosStatus === "completed" || delivered >= requested) {
+  if (delivered >= requested) {
     return "complete";
   }
-  return delivered > 0 ? "partial" : "failed";
+  if (delivered > 0) {
+    return "partial";
+  }
+  //Nothing arrived. `completed` here means the two sides disagree about a batch with no
+  //delivery behind it at all — still a failure, and the full refund that goes with it.
+  return "failed";
 }
 
 /**

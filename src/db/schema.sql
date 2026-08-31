@@ -223,6 +223,7 @@ CREATE TABLE IF NOT EXISTS caos_lots (
   -- snapshots its price: changing the product's floor must not revalue a lot already open.
   stars_requested   integer NOT NULL DEFAULT 12 CHECK (stars_requested >= 0),
   best_bits         integer,
+  mutated           boolean NOT NULL DEFAULT false,
   status            text NOT NULL DEFAULT 'queued'
                     CHECK (status IN ('queued','assigned','mining','complete','partial','failed','expired')),
   caos_request_id   text,
@@ -244,6 +245,13 @@ ALTER TABLE caos_lots ADD COLUMN IF NOT EXISTS best_share_index integer;
 -- The floor a mark has to clear to count against this lot. Defaulted so a lot opened
 -- before the column existed keeps the only floor the product has ever sold.
 ALTER TABLE caos_lots ADD COLUMN IF NOT EXISTS stars_requested integer NOT NULL DEFAULT 12;
+
+-- Whether a mark from THIS lot ever raised the creature's star count. Recorded when it
+-- happens rather than derived on read: stars_before is a snapshot from the moment the lot
+-- opened, and a player who keeps incubating in the browser meanwhile makes it stale — a lot
+-- whose marks changed nothing would still compare favourably against it and claim a
+-- mutación that never occurred.
+ALTER TABLE caos_lots ADD COLUMN IF NOT EXISTS mutated boolean NOT NULL DEFAULT false;
 
 -- Idempotency as an index, not an `if` — same shape as payments_active_per_player_idx.
 -- One live lot per PLAYER, which is stricter than P11's one-per-creature and therefore
