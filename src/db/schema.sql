@@ -217,6 +217,11 @@ CREATE TABLE IF NOT EXISTS caos_lots (
   credits_charged   bigint NOT NULL CHECK (credits_charged >= 0),
   credits_refunded  bigint NOT NULL DEFAULT 0 CHECK (credits_refunded >= 0),
   stars_before      integer NOT NULL,
+  -- The star floor this lot BOUGHT. It is what the pool was asked for and, more to the
+  -- point, what every delivered mark is measured against on the way in — a mark below it
+  -- is not the thing the player paid for. Snapshotted per lot for the same reason payments
+  -- snapshots its price: changing the product's floor must not revalue a lot already open.
+  stars_requested   integer NOT NULL DEFAULT 12 CHECK (stars_requested >= 0),
   best_bits         integer,
   status            text NOT NULL DEFAULT 'queued'
                     CHECK (status IN ('queued','assigned','mining','complete','partial','failed','expired')),
@@ -235,6 +240,10 @@ CREATE INDEX IF NOT EXISTS caos_lots_hashimon_idx ON caos_lots(hashimon_id);
 -- mark lands. Ties keep the earlier mark: the first one to reach that height is the one
 -- that did it.
 ALTER TABLE caos_lots ADD COLUMN IF NOT EXISTS best_share_index integer;
+
+-- The floor a mark has to clear to count against this lot. Defaulted so a lot opened
+-- before the column existed keeps the only floor the product has ever sold.
+ALTER TABLE caos_lots ADD COLUMN IF NOT EXISTS stars_requested integer NOT NULL DEFAULT 12;
 
 -- Idempotency as an index, not an `if` — same shape as payments_active_per_player_idx.
 -- One live lot per PLAYER, which is stricter than P11's one-per-creature and therefore

@@ -17,7 +17,6 @@ import {
   pricingTiers,
   MAX_SHARES,
   MIN_SHARES,
-  REQUESTED_STARS,
   type LotRow,
 } from "@/domain/incubation";
 
@@ -102,7 +101,10 @@ incubationRouter.post(
     try {
       const accepted = await requestHighEnergy({
         address: lot.btc_address,
-        stars: REQUESTED_STARS,
+        //The lot's own floor, not the constant: it is the number every delivered mark will
+        //be measured against, so asking for a different one than we enforce would reject
+        //honest work.
+        stars: lot.stars_requested,
         shares,
         opReturn: creature.dna,
         webhook: `${config.publicUrl.replace(/\/+$/, "")}/incubation/webhook/${lot.webhook_secret}`,

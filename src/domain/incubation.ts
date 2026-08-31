@@ -5,6 +5,7 @@ import { enrich } from "@/http/wide-event";
 import { audit } from "@/domain/audit";
 import { config } from "@/config";
 import {
+  BITS_PER_STAR,
   hashBitcoinJob,
   leadingZeroBits,
   progressionFromBits,
@@ -64,6 +65,7 @@ export interface LotRow {
   credits_charged: number;
   credits_refunded: number;
   stars_before: number;
+  stars_requested: number;
   best_bits: number | null;
   best_share_index: number | null;
   status: LotStatus;
@@ -226,6 +228,9 @@ export async function createLot(input: {
   shares: number;
   starsBefore: number;
   btcAddress: string;
+  /** The floor this lot buys. Only the product rule ever sets it; there is no route that
+   *  lets a client choose, because the price ladder is priced for this floor and no other. */
+  starsRequested?: number;
 }): Promise<LotRow> {
   const quote = await quoteFor(input.shares);
   await expireStaleLots();
@@ -252,8 +257,8 @@ export async function createLot(input: {
       const res = await query<LotRow>(
         `INSERT INTO caos_lots
            (hashimon_id, owner_id, shares_requested, credits_charged, stars_before,
-            webhook_secret, btc_address)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+            stars_requested, webhook_secret, btc_address)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING *`,
         [
           input.hashimonId,
@@ -261,6 +266,7 @@ export async function createLot(input: {
           input.shares,
           quote.credits,
           input.starsBefore,
+          input.starsRequested ?? REQUESTED_STARS,
           randomBytes(32).toString("hex"),
           input.btcAddress,
         ],
@@ -384,24 +390,37 @@ export type ShareVerdict =
   | { ok: false; error: string };
 
 /**
- * Recompute the mark and prove it belongs to this creature. Two independent checks, and both
- * have to hold:
+ * Recompute the mark and prove it belongs to this creature. Three independent checks, and all
+ * of them have to hold:
  *
  *  1. The header rebuilt from the template the pool shipped hashes to the hash it claimed.
  *     A pool that inflates `leadingZeros`, or invents a hash outright, fails here.
  *  2. The coinbase — which is what the merkle root commits to — carries this creature's DNA.
  *     Without this a pool could bill one player for another's work, or replay one mark
  *     across every creature it has ever mined for.
+ *  3. The recomputed hash actually clears the star floor the lot paid for. Checks 1 and 2
+ *     only prove the mark is *ours*; they say nothing about it being worth anything. A
+ *     header with `nonce: 0` and this creature's DNA passes both and costs nothing to
+ *     produce — without this check a pool could deliver fifty of them, close the lot
+ *     `complete`, owe no refund, and leave the creature exactly as it was.
  *
  * The DNA commitment is accepted in either encoding CaosEngine may have used for the
  * `op_return` parameter: the raw 32 bytes of the DNA, or the ASCII of its hex string. Being
  * strict about *which* one buys nothing — both prove the same binding — while guessing wrong
  * would reject every honest mark.
  */
-export function verifyShare(payload: CaosSharePayload, dna: string): ShareVerdict {
-  const snapshot = snapshotOf(payload);
+export function verifyShare(
+  payload: CaosSharePayload,
+  dna: string,
+  minBits: number = REQUESTED_STARS * BITS_PER_STAR
+): ShareVerdict {
+  let snapshot: BitcoinShareSnapshot;
   let hashBE: string;
   try {
+    //Inside the try because the adaptation itself can refuse: a prevhash that is not a whole
+    //number of 4-byte words is a wire-format change, and saying so beats reporting the pool
+    //for a mismatch it did not cause.
+    snapshot = snapshotOf(payload);
     hashBE = hashBitcoinJob({
       ...snapshot,
       extranonce1: payload.extranonce1,
@@ -409,7 +428,9 @@ export function verifyShare(payload: CaosSharePayload, dna: string): ShareVerdic
       nonceHex: payload.nonce.toString(16).padStart(8, "0"),
     }).hashBE;
   } catch {
-    //Malformed hex anywhere in the template — Buffer.from would have produced garbage.
+    //A template that cannot be rebuilt at all. Reachable from the route only for lengths the
+    //schema does not pin, since it rejects non-hex before this is ever called — but domain
+    //code must not assume its only caller is that route.
     return { ok: false, error: "malformed_template" };
   }
 
@@ -426,7 +447,15 @@ export function verifyShare(payload: CaosSharePayload, dna: string): ShareVerdic
     return { ok: false, error: "dna_not_committed" };
   }
 
-  return { ok: true, bits: leadingZeroBits(hashBE), snapshot };
+  //The floor is the one the lot bought, not the one the pool claims to have hit: `stars` and
+  //`leadingZeros` travel in the payload and are worth exactly as much as any other number a
+  //pool reports. Only the recomputed hash counts.
+  const bits = leadingZeroBits(hashBE);
+  if (bits < minBits) {
+    return { ok: false, error: "below_floor" };
+  }
+
+  return { ok: true, bits, snapshot };
 }
 
 export type ApplyShareResult =
@@ -457,7 +486,7 @@ export async function applyShare(lot: LotRow, payload: CaosSharePayload): Promis
     return { ok: false, error: "hashimon_gone" };
   }
 
-  const verdict = verifyShare(payload, row.dna);
+  const verdict = verifyShare(payload, row.dna, lot.stars_requested * BITS_PER_STAR);
   if (!verdict.ok) {
     enrich({ share_reject_reason: verdict.error, lot_id: lot.id });
     return { ok: false, error: verdict.error };

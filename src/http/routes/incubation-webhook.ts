@@ -25,23 +25,39 @@ export const incubationWebhookRouter = Router();
 //  2. Unlike the BTCPay webhook, this router is mounted AFTER express.json(): there are no
 //     raw bytes to preserve because there is no signature over them.
 
+//Hex has to be validated HERE, not left to the recomputation. `Buffer.from("nothex", "hex")`
+//returns an empty buffer instead of throwing, so a corrupt template would sail through and
+//come out the other end as `hash_mismatch` — the one verdict that means "the pool lied about
+//its work". Garbage in the wire format and a dishonest pool are different accusations.
+const hex = (bytes?: number) => {
+  const base = z.string().regex(/^(?:[0-9a-fA-F]{2})*$/, "expected an even-length hex string");
+  return bytes === undefined ? base : base.length(bytes * 2);
+};
+
+//Bitcoin's extranonce2 is a handful of bytes (spoon uses 8). The bound matters because the
+//value reaches `padStart(extranonce2Size * 2)`, which will happily try to build a string of
+//whatever length it is handed before anything else gets a chance to reject it.
+const MAX_EXTRANONCE2_BYTES = 32;
+
 //A mark. Every field the Caos Core needs to rebuild the header, and nothing optional about
 //them — a missing one means a template that cannot be recomputed, which is a 400, not a
 //silently dropped mark.
 const shareSchema = z.object({
   requestId: z.string().min(1),
-  version: z.string().min(1),
+  version: hex(4),
   nonce: z.number().int().nonnegative(),
-  hash: z.string().min(1),
-  prevHash: z.string().min(1),
-  bits: z.string().min(1),
+  hash: hex(32),
+  prevHash: hex(32),
+  bits: hex(4),
   timestamp: z.number().int().nonnegative(),
-  merkleBranch: z.array(z.string()),
-  coinbasePrefix: z.string().min(1),
-  coinbaseSuffix: z.string().min(1),
-  extranonce1: z.string(),
-  extranonce2: z.string(),
-  extranonce2Size: z.number().int().positive(),
+  //Not length(32): a merkle branch entry is a digest, but the fold only concatenates, so a
+  //short one is the pool's problem to explain — via hash_mismatch, which is exactly right.
+  merkleBranch: z.array(hex()),
+  coinbasePrefix: hex().min(2),
+  coinbaseSuffix: hex().min(2),
+  extranonce1: hex(),
+  extranonce2: hex(),
+  extranonce2Size: z.number().int().positive().max(MAX_EXTRANONCE2_BYTES),
   shareIndex: z.number().int().nonnegative(),
   opReturn: z.string().optional(),
   sharesTotal: z.number().int().optional(),

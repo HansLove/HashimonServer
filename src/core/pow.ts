@@ -78,9 +78,20 @@ export type BitcoinShareSnapshot = Omit<BitcoinJobInput, "extranonce1" | "extran
 
 /** Stratum ships prevhash word-swabbed (4-byte words reversed in place). Undoing the swab is
  *  reversing the order of those 8 words — the bytes inside each word stay put — which yields
- *  the display (BE) hash `BitcoinJobInput.prevhashBE` expects. */
+ *  the display (BE) hash `BitcoinJobInput.prevhashBE` expects.
+ *
+ *  Throws on anything that is not a whole number of 4-byte words. Silently dropping a
+ *  trailing partial word would return a well-formed hash that is simply the wrong one, and
+ *  the caller would report the mark as a hash mismatch — an accusation of dishonesty for
+ *  what is really a change in the pool's wire format. */
 export function stratumPrevHashToBE(prevHashStratum: string): string {
-  return (prevHashStratum.match(/.{8}/g) ?? []).reverse().join("");
+  const words = prevHashStratum.match(/.{8}/g);
+  if (!words || words.join("").length !== prevHashStratum.length) {
+    throw new Error(
+      `stratumPrevHashToBE: prevhash length ${prevHashStratum.length} is not a whole number of 4-byte words`
+    );
+  }
+  return words.reverse().join("");
 }
 
 export interface PowRecord {

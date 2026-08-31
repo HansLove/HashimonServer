@@ -108,33 +108,54 @@ describe("closing vocabulary", () => {
 
 describe("verifying a mark", () => {
   it("accepts spoon's own share and reads its work off the recomputed hash", () => {
-    const verdict = verifyShare(goldenShare(), GOLDEN_DNA);
+    const verdict = verifyShare(goldenShare(), GOLDEN_DNA, 0);
     assert.equal(verdict.ok, true);
     assert.ok(verdict.ok && verdict.bits === 3);
   });
 
   //The referee rule: what the pool claims is never what gets recorded.
   it("rejects a hash the template does not produce", () => {
-    const verdict = verifyShare(goldenShare({ hash: "00".repeat(32) }), GOLDEN_DNA);
+    const verdict = verifyShare(goldenShare({ hash: "00".repeat(32) }), GOLDEN_DNA, 0);
     assert.deepEqual(verdict, { ok: false, error: "hash_mismatch" });
   });
 
   it("rejects a tampered template even when the hash is genuine", () => {
     const branch = goldenShare().merkleBranch;
-    const verdict = verifyShare(goldenShare({ merkleBranch: [branch[1]!, branch[0]!] }), GOLDEN_DNA);
+    const verdict = verifyShare(goldenShare({ merkleBranch: [branch[1]!, branch[0]!] }), GOLDEN_DNA, 0);
     assert.deepEqual(verdict, { ok: false, error: "hash_mismatch" });
   });
 
   //Without this a pool could bill one player for work mined for another, or replay one
   //mark across every creature it has ever mined for.
   it("rejects a genuine mark that does not commit to this creature", () => {
-    const verdict = verifyShare(goldenShare(), "ab".repeat(32));
+    const verdict = verifyShare(goldenShare(), "ab".repeat(32), 0);
     assert.deepEqual(verdict, { ok: false, error: "dna_not_committed" });
   });
 
-  it("does not throw on a malformed template", () => {
-    const verdict = verifyShare(goldenShare({ coinbasePrefix: "nothex" }), GOLDEN_DNA);
+  //A template that cannot be rebuilt is not the same accusation as a hash that does not
+  //match: one is a wire-format change, the other is a pool claiming work it did not do.
+  it("names a template it cannot rebuild instead of blaming the hash", () => {
+    const verdict = verifyShare(goldenShare({ prevHash: "abc" }), GOLDEN_DNA, 0);
+    assert.deepEqual(verdict, { ok: false, error: "malformed_template" });
+  });
+
+  it("does not throw on hex it cannot parse", () => {
+    const verdict = verifyShare(goldenShare({ coinbasePrefix: "nothex" }), GOLDEN_DNA, 0);
     assert.equal(verdict.ok, false);
+  });
+
+  //A header this creature's DNA is committed to, hashing to exactly what was claimed, and
+  //still worthless: nonce 0 costs nothing. Checks 1 and 2 prove the mark is OURS, not that
+  //it is worth anything — without the floor a pool bills a full lot for fifty of these.
+  it("rejects a genuine, correctly committed mark that did no work", () => {
+    const verdict = verifyShare(goldenShare(), GOLDEN_DNA);
+    assert.deepEqual(verdict, { ok: false, error: "below_floor" });
+  });
+
+  //The floor is measured on the recomputed hash, never on what the pool says it achieved.
+  it("ignores the stars the pool claims and measures the hash itself", () => {
+    const verdict = verifyShare(goldenShare({ stars: 40, leadingZeros: 160 }), GOLDEN_DNA);
+    assert.deepEqual(verdict, { ok: false, error: "below_floor" });
   });
 });
 
@@ -171,7 +192,11 @@ describe("the lot ledger (against the local DB)", () => {
 
   //Each test needs its own DNA: the golden vector's coinbase commits to exactly one, and
   //hashimons.dna is UNIQUE, so tests that both need a *verifiable* mark cannot share it.
-  async function openLot(shares: number, credits: number, dna: string, bestBits = 0) {
+  //
+  //`starsRequested` defaults to 0 here because the golden vector carries 3 bits of work —
+  //nothing can synthesize a real 12-star mark in a test, that is the entire point of the
+  //floor. A lot at the product's real floor is opened explicitly, once, to pin the refusal.
+  async function openLot(shares: number, credits: number, dna: string, bestBits = 0, starsRequested = 0) {
     const playerId = await seedPlayer(credits);
     const hashimonId = await seedCreature(playerId, dna, bestBits);
     const lot = await createLot({
@@ -180,6 +205,7 @@ describe("the lot ledger (against the local DB)", () => {
       shares,
       starsBefore: Math.floor(bestBits / 4),
       btcAddress: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      starsRequested,
     });
     return { playerId, hashimonId, lot };
   }
@@ -219,8 +245,32 @@ describe("the lot ledger (against the local DB)", () => {
     assert.equal(await creditsOf(playerId), 490);
   });
 
+  //Two phases on the one creature the golden vector can prove: hashimons.dna is UNIQUE, so
+  //GOLDEN_DNA exists exactly once in this suite and both halves of the story share it.
   it("counts a verified mark once, mutates the creature and closes a full lot", async () => {
-    const { hashimonId, lot } = await openLot(1, 500, GOLDEN_DNA);
+    //Phase 1: the same mark, against a lot that bought the product's real floor. It
+    //recomputes correctly and commits to this very creature — and is still not delivery.
+    const { playerId, hashimonId, lot: strictLot } = await openLot(1, 500, GOLDEN_DNA, 0, 12);
+    assert.deepEqual(await applyShare(strictLot, goldenShare()), { ok: false, error: "below_floor" });
+    const refused = await query<{ shares_delivered: number; status: string }>(
+      `SELECT shares_delivered, status FROM caos_lots WHERE id = $1`,
+      [strictLot.id]
+    );
+    //Nothing delivered, and the lot is still open: a refused mark is not a closed lot.
+    assert.equal(refused.rows[0]!.shares_delivered, 0);
+    assert.equal(refused.rows[0]!.status, "queued");
+    await closeLotById(strictLot.id, "failed", "test_teardown");
+
+    //Phase 2: the floor lowered to what a synthetic vector can actually reach. Nothing else
+    //about the mark changes — this is the accept path.
+    const lot = await createLot({
+      playerId,
+      hashimonId,
+      shares: 1,
+      starsBefore: 0,
+      btcAddress: "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      starsRequested: 0,
+    });
     const applied = await applyShare(lot, goldenShare());
     assert.equal(applied.ok, true);
     assert.ok(applied.ok && !applied.duplicate && applied.isNewBest);
@@ -268,6 +318,7 @@ describe("the lot ledger (against the local DB)", () => {
     );
     assert.equal(after.rows[0]!.shares_delivered, 0);
   });
+
 
   it("refunds the undelivered marks on a partial close, exactly once", async () => {
     const { playerId, lot } = await openLot(10, 500, "a6".repeat(32));
