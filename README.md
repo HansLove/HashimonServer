@@ -25,16 +25,20 @@ src/
   data/
     species.ts   server-side species registry (identity + base stats; keys gate emission)
   db/
-    schema.sql   players, sessions, hashimons (emission ledger), audit_log
+    schema.sql   players, sessions, hashimons (emission ledger), credits_plans,
+                 payments, audit_log
     pool.ts      pg pool + withTransaction
     migrate.ts   applies schema.sql (idempotent)
   domain/
-    players.ts   identity + bearer sessions
-    hashimons.ts emission (server-owned birth), inventory, present() (derived view)
-    audit.ts     append-only audit log
+    players.ts      identity + bearer sessions
+    hashimons.ts    emission (server-owned birth), inventory, present() (derived view)
+    credit-plans.ts the credit catalogue — the price lives here, never in a request
+    payments.ts     charges, webhook transitions, once-only credit settlement
+    audit.ts        append-only audit log
   http/
     app.ts       express wiring          auth.ts    bearer-session gate
-    errors.ts    AppError + JSON errors   routes/    session, profile, hashimons, health
+    errors.ts    AppError + JSON errors   routes/    session, profile, hashimons, health,
+                                                     payments, payments-webhook
   server.ts      entry point
 ```
 
@@ -101,6 +105,12 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | GET | `/hashimons/:id` | ✓ | one owned creature |
 | POST | `/hashimons` | ✓ | emission — **403 `cannot_own` without public_key** |
 | POST | `/wallet/claim-self-custody` | ✓ | drop server-held enc private key |
+| GET | `/payments/plans` | – | the credit catalogue (active plans, in display order) |
+| POST | `/payments/btcpay-server/invoice` | ✓ | open a charge from a `sku` — **409 `payment_pending`** if one is already live |
+| GET | `/payments/btcpay-server/active` | ✓ | the live charge, or **204** when there is none |
+| GET | `/payments/btcpay-server/invoice/:orderId` | ✓ | one charge — what the client polls |
+| POST | `/payments/btcpay-server/invoice/:orderId/cancel` | ✓ | give up on a `waiting` charge — **409 `payment_in_flight`** once coins are on the wire |
+| POST | `/payments/btcpay-server/webhook` | HMAC | BTCPay callback — **401** on a bad signature |
 | GET | `/internal/luanti-auth` | secret | account list `{name, password, can_own}` for Luanti poll |
 | POST | `/internal/luanti-register` | secret | `{name, password}` → 201 guest row (in-game signup) |
 | POST | `/internal/luanti-bind` | secret | `{name}` → bearer session (owners only) |
@@ -217,6 +227,104 @@ curl -s -X POST localhost:4000/internal/magi/issue \
   -d '{"holder":"Hans","count":2}' | jq
 ```
 
+### Credit purchases (BTCPay Server)
+
+`players.credits` only ever moves through this flow. The client sends a **`sku`, never
+an amount** — the price is read from `credits_plans` on the server, and a body carrying
+`amount` or `price` is a 400, not a silently ignored field.
+
+```json
+// POST /payments/btcpay-server/invoice   → 201
+{ "payment": {
+    "orderId": "credits-3f2a…", "status": "waiting",
+    "sku": "credits_1200", "credits": 1200, "amountUsd": 10,
+    "amountBtc": "0.00008412", "address": "bc1q…",
+    "bip21": "bitcoin:bc1q…?amount=0.00008412",
+    "checkoutLink": "https://btcpay…/i/…",
+    "expiresAt": "2026-08-27T18:05:09.123Z", "settledAt": null } }
+```
+
+Six statuses, all decided here: `waiting → confirming → settled | expired | failed |
+cancelled` (the last four terminal). The client runs no state machine of its own — the
+phase of its UI *is* `status`. `amountUsd` is a number; `amountBtc` stays a decimal
+string, because it is money.
+
+Two guarantees live in SQL rather than in an `if` (`src/db/schema.sql`):
+
+- **one live charge per player** — `payments_active_per_player_idx`, a unique partial
+  index over `status IN ('waiting','confirming')`. A second concurrent POST gets `23505`,
+  which the route turns into 409 `payment_pending` **with the live charge in the body**,
+  so the client can offer resume-or-discard without a second round trip.
+- **credits granted exactly once** — `UPDATE … WHERE status <> 'settled' RETURNING *`.
+  BTCPay redelivers webhooks (`isRedelivery`), so a repeat is the normal case; only the
+  first update returns a row, and crediting rides in the same transaction as the audit entry.
+
+**Cancelling is only allowed while `waiting`.** Once the charge is `confirming` BTCPay has
+already seen coins, so a cancel there is a mistake every time — it is refused with 409
+`payment_in_flight` (an already-terminal charge gives 409 `payment_terminal`). That is not
+the last net, though: `settleAndCredit` guards on `status <> 'settled'`, *not* on "not
+terminal", so money that actually arrives is credited even to a charge the player cancelled
+or that BTCPay let expire. Refusing to honour a real payment over our own bookkeeping would
+be the worse bug.
+
+`payments` snapshots `sku`/`credits`/`amount_usd` when the charge opens. Raising a plan's
+price never revalues a charge already issued — the FK to `credits_plans` is referential
+integrity, nothing more. Plans are edited by SQL; there is no admin CRUD yet.
+
+Webhook events map as: `InvoiceReceivedPayment`/`InvoiceProcessing` → `confirming`,
+`InvoiceSettled` → `settled` (+credits), `InvoiceExpired` → `expired`, `InvoiceInvalid` →
+`failed`. `InvoiceCreated` and `InvoicePaymentSettled` transition nothing.
+
+### Quick manual check (credit purchase)
+
+The webhook is mounted **before** `express.json()` so the HMAC can be computed over the
+raw bytes — the signature covers the exact body, so `--data-raw` must send it byte for byte:
+
+Run it from the project root — `node -e` resolves `@taloon/btcpay-middleware` from
+`node_modules`. `SECRET` must be the same value the running server has in
+`BTCPAY_WEBHOOK_SECRET`; `node -e` does not read `.env`, so pass it explicitly.
+
+```bash
+curl -s localhost:4000/payments/plans | jq
+
+SECRET=smoke-secret   # whatever the server was started with
+BODY='{"deliveryId":"d1","webhookId":"w1","originalDeliveryId":"d1","isRedelivery":false,"type":"InvoiceSettled","timestamp":0,"storeId":"s","invoiceId":"inv-demo"}'
+SIG=$(BODY="$BODY" SECRET="$SECRET" node --input-type=module \
+  -e 'import {computeSignature} from "@taloon/btcpay-middleware";
+      process.stdout.write(computeSignature(Buffer.from(process.env.BODY,"utf8"), process.env.SECRET));')
+
+curl -s -X POST localhost:4000/payments/btcpay-server/webhook \
+  -H 'content-type: application/json' -H "btcpay-sig: sha256=$SIG" --data-raw "$BODY"
+# {"status":"ok"} — send it twice: credits move once.
+```
+
+The `sha256=` prefix is required; without it the middleware rejects the header before
+comparing anything. Seed a row with that `invoice_id` first, or the webhook is a no-op on an
+unknown invoice. Forcing `status` in the DB is also how to walk the client through every
+screen without waiting on the Bitcoin network.
+
+**With no `BTCPAY_WEBHOOK_SECRET` set, the route answers 503 and never reaches the
+middleware.** That is deliberate: the library verifies the HMAC only `if (webhookSecret)`, so
+a blank secret would make this an anonymous credit-minting endpoint, and nothing else about
+the app would fail to announce it.
+
+### Known gaps in the payment flow
+
+Recorded rather than fixed — each needs a decision, not just code:
+
+- **No reconciliation against BTCPay.** `applyWebhook` is the only writer of `settled`. If
+  every delivery of an `InvoiceSettled` fails (server down through the whole retry window),
+  the charge stays `confirming` forever: money in, credits never granted, no alarm.
+  `BTCPayClient.getInvoice` exists and is unused — a sweeper over stale `confirming` rows is
+  the fix when this matters.
+- **Cancelling does not archive the invoice at BTCPay**, which the library exposes no method
+  for. A cancelled charge's address stays payable; it still credits if paid
+  (`settleAndCredit` guards only on `<> 'settled'`), but orphan invoices accumulate.
+- **Buying is gated by `requireSession` only, not `canOwn`.** A keyless anonymous player can
+  spend real BTC on credits reachable only through that one bearer token — clear the browser
+  storage and they are gone. Deliberate (the checkout is only reachable from the portal, which
+  requires `/register` or `/login`), but it is the one value-bearing route with no `canOwn`.
+
 ## Logging — one wide event per request
 
 The server does not scatter log lines through a handler. Every HTTP request produces
@@ -258,11 +366,17 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
 - Core + auth helper tests (`pnpm test`) — SHA-256 / DNA / PoW parity plus username, Luanti SRP entry (against a vector the engine's own `core.check_password_entry` accepted), key encrypt round-trip, `canOwn`.
 - Owner smoke: `/register` → `/internal/luanti-auth` → `/internal/luanti-bind`; anonymous `POST /hashimons` → 403 `cannot_own`.
 - Guest smoke: `/internal/luanti-register` → 201, same name in another casing → 409, non-SRP password → 422, then `/login` on that name with the right password → 200, wrong password → 401, then `/register` with the right password → 200 (claimed) and `canOwn: true`.
+- Payments smoke (disposable Postgres, no live BTCPay): `pnpm migrate` twice — idempotent, seed not duplicated; a second live charge for one player rejected by `payments_active_per_player_idx`; a status outside the six rejected by the CHECK; signed webhook → 200 and credits +1200, the same delivery repeated → 200 and credits still 1200; wrong signature → 401; `sku` unknown → 400, `amount` in the body → 400, `/active` with nothing live → 204.
+- **Not verified:** anything against the real BTCPay instance. No invoice has been created
+  or paid end to end — `POST /invoice` has only been exercised against an unreachable
+  gateway (correctly → 502 `gateway_error`).
 
 ## Next phases (not built yet)
 
 3. **Incubation / Caos Engine** — server-owned seed so births can't be grinded.
-4. **Credits / payments** — via a provider (Stripe-class), never hand-rolled.
+4. **Credits / payments** — buying credits with Bitcoin is built (see above); what the
+   credits *buy* is not. There is no sink yet, and no admin surface for the catalogue.
+   Fiat, if it ever happens, goes through a provider (Stripe-class), never hand-rolled.
 5. **MCP layer** — the player's own AI reads and *suggests*; it never writes
    authoritative state.
 
