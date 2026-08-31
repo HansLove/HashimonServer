@@ -104,6 +104,12 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | GET | `/internal/luanti-auth` | secret | account list `{name, password, can_own}` for Luanti poll |
 | POST | `/internal/luanti-register` | secret | `{name, password}` → 201 guest row (in-game signup) |
 | POST | `/internal/luanti-bind` | secret | `{name}` → bearer session (owners only) |
+| GET | `/magi/supply` | – | issued vs. cap, backing sats, epoch (public by design) |
+| POST | `/internal/magi/issue` | secret | `{holder, count}` → mint into a vault, **409 `supply_exhausted`** past the cap |
+| POST | `/internal/magi/withdraw` | secret | `{holder, count}` → sealed tokens to materialize as items |
+| POST | `/internal/magi/deposit` | secret | `{holder, notes[]}` → dematerialize; a note that fails custody is not deposited |
+| POST | `/internal/magi/custody` | secret | `{holder, notes[], event}` → verdict per note + rotated token |
+| GET | `/internal/magi/holder/:name` | secret | vaulted / materialized counts for one account |
 
 ### `POST /register` (Lovable contract)
 
@@ -179,6 +185,36 @@ ENTRY='#1#CWvgWHs19Sugq+uNeEFcKQ==#MVCq88fj…'   # what the engine hands the mo
 curl -s -X POST localhost:4000/internal/luanti-register \
   -H "X-Luanti-Secret: $LUANTI_SERVER_SECRET" -H 'content-type: application/json' \
   -d "{\"name\":\"Hans\",\"password\":\"$ENTRY\"}" | jq
+```
+
+### MAGI — the finite cubic object
+
+A MAGI lives as an **item in a Luanti inventory** (`3d-world/mods/hashimon_magi`);
+`magi_notes` is the authority on whether that item is real. Two layers:
+
+- **Seal** — HMAC over `(serial, sats, epoch, custody_nonce)` with `MAGI_SEAL_SECRET`,
+  which never leaves this process. Catches a fabricated or edited note.
+- **Custody nonce** — rotated on *every* check. A seal alone cannot catch duplication:
+  a byte-identical clone carries a byte-identical valid seal. Rotation makes custody a
+  chain, so once either copy is checked the other presents a retired nonce and is
+  destroyed. A dupe glitch leaves **exactly one** surviving MAGI — the server never has
+  to decide which copy was the original, because supply is preserved either way.
+
+Verdicts are `ok | stale | forged | unknown | retired`; only those destroy an item.
+A transport failure is never a verdict — the mod leaves the note alone and marks it
+unverified, so an outage cannot confiscate money. Every check, accepted or rejected,
+lands in `magi_custody_log` with the presented nonce and the ledger's sequence number.
+
+Issuance is capped at `MAGI_SUPPLY_CAP` under an exclusive table lock, so two
+concurrent mints cannot both take the last note. `reserveSats` is *derived*
+(`issued × MAGI_SATS_PER_MAGI`), asserted rather than proven on chain — the reserve is
+a public constraint on issuance, not a redemption promise.
+
+```bash
+curl -s localhost:4000/magi/supply | jq
+curl -s -X POST localhost:4000/internal/magi/issue \
+  -H "X-Luanti-Secret: $LUANTI_SERVER_SECRET" -H 'content-type: application/json' \
+  -d '{"holder":"Hans","count":2}' | jq
 ```
 
 ## Logging — one wide event per request

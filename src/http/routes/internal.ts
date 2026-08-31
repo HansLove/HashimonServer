@@ -1,7 +1,6 @@
-import { timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
-import { config } from "@/config";
+import { requireLuantiSecret } from "@/http/luanti-secret";
 import { AppError, asyncHandler } from "@/http/errors";
 import { enrich } from "@/http/wide-event";
 import {
@@ -12,26 +11,15 @@ import {
   presentPlayer,
   registerLuantiGuest,
 } from "@/domain/players";
+import {
+  presentTerritory,
+  replaceTownClaims,
+  upsertPlayerTerritory,
+  type TownClaimInput,
+} from "@/domain/territory";
 
 export const internalRouter = Router();
 
-function requireLuantiSecret(req: { header: (n: string) => string | undefined }) {
-  const secret = config.luantiServerSecret;
-  if (!secret) {
-    throw new AppError(503, "LUANTI_SERVER_SECRET not configured", "misconfigured");
-  }
-  const provided = req.header("x-luanti-secret") ?? "";
-  const providedBuf = Buffer.from(provided);
-  const secretBuf = Buffer.from(secret);
-  // Constant-time compare: this secret gates an endpoint that discloses Luanti
-  // password hashes and mints bearer sessions, so a timing side-channel matters.
-  // Length must match before timingSafeEqual (it throws on mismatched lengths).
-  const matches = providedBuf.length === secretBuf.length && timingSafeEqual(providedBuf, secretBuf);
-  if (!matches) {
-    throw new AppError(401, "invalid luanti server secret", "unauthorized");
-  }
-  enrich({ auth_source: "luanti" });
-}
 
 /** Poll target for Luanti auth — every named account with a password entry, owner or
  *  not. The mod answers `get_auth` from this list, so leaving guests out would make the
@@ -94,5 +82,92 @@ internalRouter.post(
       expiresAt: session.expires_at,
       player: presentPlayer(player),
     });
+  })
+);
+
+const territorySchema = z.object({
+  name: z.string().min(1).max(20),
+  townName: z.string().max(64).nullable().optional(),
+  townBlockCount: z.number().int().min(0).max(1_000_000).default(0),
+  ownedPlotCount: z.number().int().min(0).max(1_000_000).default(0),
+  isMayor: z.boolean().default(false),
+});
+
+/** The Luanti world pushes each player's Towny summary here (town, block/plot counts,
+ *  mayor flag) so the website can show it. A projection, not a ledger event — no audit,
+ *  no ownership consequence. Unknown players are simply ignored (a purely local player
+ *  with no API account). */
+internalRouter.post(
+  "/internal/luanti-territory",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const body = territorySchema.parse(req.body ?? {});
+    enrich({ username: body.name });
+    const player = await getPlayerByUsername(body.name);
+    if (!player) {
+      enrich({ territory_result: "not_found" });
+      throw new AppError(404, "player not found", "not_found");
+    }
+    const row = await upsertPlayerTerritory({
+      playerId: player.id,
+      townName: body.townName ?? null,
+      townBlockCount: body.townBlockCount,
+      ownedPlotCount: body.ownedPlotCount,
+      isMayor: body.isMayor,
+    });
+    enrich({
+      territory_result: "ok",
+      player_id: player.id,
+      has_town: Boolean(row.town_name),
+      town_block_count: row.town_block_count,
+    });
+    res.json({ territory: presentTerritory(row) });
+  })
+);
+
+// A mapblock coordinate pair [x, z]. Bounds keep a bad push from ballooning the payload.
+const blockPair = z.tuple([
+  z.number().int().min(-1_000_000).max(1_000_000),
+  z.number().int().min(-1_000_000).max(1_000_000),
+]);
+
+const townsSchema = z.object({
+  towns: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(64),
+        blockCount: z.number().int().min(0).max(100_000).default(0),
+        memberCount: z.number().int().min(0).max(100_000).default(0),
+        mayor: z.string().max(20).nullable().optional(),
+        home: blockPair.nullable().optional(),
+        // Capped per town: Towny's default claim cap is 64, unlimited by priv; 20k is a
+        // generous ceiling that still bounds the row.
+        blocks: z.array(blockPair).max(20_000).default([]),
+      })
+    )
+    .max(5_000),
+});
+
+/** The Luanti world pushes the WHOLE town snapshot here (every town in towny.town_array,
+ *  with each claimed mapblock's [x,z]) so the ranking is complete and the web can draw a
+ *  cadastral map. Replace-all: the world is authoritative. A projection, not a ledger
+ *  event. */
+internalRouter.post(
+  "/internal/luanti-towns",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { towns } = townsSchema.parse(req.body ?? {});
+    const input: TownClaimInput[] = towns.map((t) => ({
+      name: t.name,
+      blockCount: t.blockCount,
+      memberCount: t.memberCount,
+      mayor: t.mayor ?? null,
+      homeX: t.home ? t.home[0] : null,
+      homeZ: t.home ? t.home[1] : null,
+      blocks: t.blocks,
+    }));
+    const count = await replaceTownClaims(input);
+    enrich({ towns_result: "ok", town_count: count });
+    res.json({ ok: true, townCount: count });
   })
 );

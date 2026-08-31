@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Authoritative Hashimon server — Phase 1: identity, inventory, emission. A referee, not an oracle.",
+  "description": "Authoritative Hashimon server \u2014 Phase 1: identity, inventory, emission. A referee, not an oracle.",
   "packageManager": "pnpm@9.15.0",
   "engines": {
     "node": ">=20"
@@ -14,8 +14,10 @@
     "build": "tsc --noEmit && esbuild src/server.ts src/db/migrate.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outdir=dist && cp src/db/schema.sql dist/db/schema.sql",
     "start": "node dist/server.js",
     "migrate": "node dist/db/migrate.js",
+    "migrate:dev": "node --import tsx src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts src/domain/block-template.test.ts src/domain/bitcoin-address.test.ts src/http/wide-event.test.ts"
+    "validate:birth": "node --import tsx scripts/validate-birth-identity.mts",
+    "test": "node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts src/domain/block-template.test.ts src/domain/bitcoin-address.test.ts src/http/wide-event.test.ts src/domain/magi.test.ts"
   },
   "dependencies": {
     "@noble/secp256k1": "2.2.3",

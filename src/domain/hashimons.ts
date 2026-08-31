@@ -1,8 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { isUniqueViolation, query, withTransaction } from "@/db/pool";
 import { audit } from "@/domain/audit";
 import { Dna, progressionOf, verifyStoredPow, type PowRecord, type BitcoinShareSnapshot, CORE_VERSION } from "@/core/index";
-import { Hashimons } from "@/data/species";
+import { Hashimons, isAnyGenesis } from "@/data/species";
+import { config } from "@/config";
 
 //The stored row. Note what is NOT here: no stats, no colours, no type. Those are
 //derived from dna + pow by the Caos Core (see present()), so they can never be
@@ -18,6 +19,10 @@ export interface HashimonRow {
   algo_version: string;
   name: string;
   born_at: string;
+  birth_spirit: string | null;
+  life_number: number | null;
+  archived_at: string | null;
+  archive_reason: string | null;
   best_share_bits: number;
   best_share_hash: string | null;
   best_share_nonce: number | null;
@@ -60,6 +65,10 @@ export function present(row: HashimonRow) {
     provenance: row.provenance,
     algoVersion: row.algo_version,
     bornAt: row.born_at,
+    //Birth Identity pública. Null en los salvajes.
+    birthSpirit: row.birth_spirit,
+    lifeNumber: row.life_number,
+    archivedAt: row.archived_at,
     ...progression, //tier, stars, stage, progress, nextThreshold, bits
     pow: {
       bestShareBits: pow.bestShareBits,
@@ -79,12 +88,14 @@ export function present(row: HashimonRow) {
 export type Provenance = "wild" | "starter";
 
 export function isGenesisSpecies(speciesKey: string): boolean {
-  return speciesKey.startsWith("genesis_");
+  return isAnyGenesis(speciesKey);
 }
 
 export async function countStarterEmissions(ownerId: string): Promise<number> {
   const res = await query<{ count: number }>(
-    `SELECT COUNT(*)::int AS count FROM hashimons WHERE owner_id = $1 AND provenance = 'starter'`,
+    `SELECT COUNT(*)::int AS count
+       FROM hashimons
+      WHERE owner_id = $1 AND provenance = 'starter' AND archived_at IS NULL`,
     [ownerId]
   );
   return res.rows[0]?.count ?? 0;
@@ -100,12 +111,43 @@ export async function countStarterEmissions(ownerId: string): Promise<number> {
 //identity that becomes is the server's to decide. Wild-encounter seeding from a
 //server-owned world seed (so even *which* species you meet isn't client-chosen)
 //is the Phase 3 Caos Engine hook — this is the emission gate it plugs into.
+//Capa B — el individuo singular. La semilla de nacimiento del servidor.
+//
+//    serverBirthSeed = HMAC-SHA256(BIRTH_SECRET,
+//                        monotonic_ns ‖ random(32) ‖ ownerId ‖ speciesKey ‖ retry)
+//    birthNonce      = primeros 16 hex        (misma forma que randomBytes(8).hex)
+//
+//Honestamente: randomBytes YA era impredecible, así que el HMAC no añade
+//imprevisibilidad. Lo que añade es AUDITABILIDAD — con la clave del servidor,
+//cada nonce es recomputable a partir de su entrada, así que un servidor puede
+//demostrar después que no molió nonces para regalarle una criatura rara a un
+//amigo. El `retry` va en el preimagen porque emit() reintenta ante colisión de
+//DNA y sin él los cinco intentos darían el mismo nonce.
+//
+//Sin BIRTH_SECRET configurado esto degrada a randomBytes puro: se pierde la
+//auditabilidad, no la seguridad. Nunca se detiene un nacimiento por esto.
+function deriveBirthNonce(ownerId: string, speciesKey: string, retry: number): string {
+  const entropy = randomBytes(32);
+  if (!config.birthSecret) {
+    return entropy.subarray(0, 8).toString("hex");
+  }
+  return createHmac("sha256", config.birthSecret)
+    .update(`${process.hrtime.bigint()}:`)
+    .update(entropy)
+    .update(`:${ownerId}:${speciesKey}:${retry}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
 export async function emit(input: {
   ownerId: string;
   speciesKey: string;
   templateId?: string;
   provenance?: Provenance;
   name?: string;
+  //Sólo en un Genesis: el destino compartido que la fecha ya fijó.
+  birthSpirit?: string;
+  lifeNumber?: number;
 }): Promise<HashimonRow> {
   const species = Hashimons[input.speciesKey];
   if (!species) {
@@ -115,16 +157,19 @@ export async function emit(input: {
   const provenance = input.provenance ?? "wild";
 
   for (let attempt = 0; attempt < 5; attempt++) {
-    const birthNonce = randomBytes(8).toString("hex");
+    const birthNonce = deriveBirthNonce(input.ownerId, input.speciesKey, attempt);
+    //La fórmula del DNA NO cambia entre V1 y V2. Lo que cambió es de dónde sale
+    //el speciesKey: antes lo elegía el cliente, ahora lo fija la fecha.
     const dna = Dna.derive(templateId, birthNonce, input.speciesKey);
 
     try {
       return await withTransaction(async (client) => {
         const res = await query<HashimonRow>(
-          `INSERT INTO hashimons (owner_id, dna, species_key, template_id, birth_nonce, provenance, algo_version, name)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          `INSERT INTO hashimons (owner_id, dna, species_key, template_id, birth_nonce, provenance, algo_version, name, birth_spirit, life_number)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING *`,
-          [input.ownerId, dna, input.speciesKey, templateId, birthNonce, provenance, CORE_VERSION, input.name?.trim() || ""],
+          [input.ownerId, dna, input.speciesKey, templateId, birthNonce, provenance, CORE_VERSION, input.name?.trim() || "",
+           input.birthSpirit ?? null, input.lifeNumber ?? null],
           client
         );
         const row = res.rows[0]!;
@@ -132,7 +177,10 @@ export async function emit(input: {
           playerId: input.ownerId,
           hashimonId: row.id,
           action: "emission",
-          detail: { speciesKey: input.speciesKey, provenance, dna },
+          detail: {
+            speciesKey: input.speciesKey, provenance, dna,
+            birthSpirit: input.birthSpirit ?? null, lifeNumber: input.lifeNumber ?? null,
+          },
         });
         return row;
       });
@@ -149,7 +197,7 @@ export async function emit(input: {
 
 export async function listByOwner(ownerId: string): Promise<HashimonRow[]> {
   const res = await query<HashimonRow>(
-    `SELECT * FROM hashimons WHERE owner_id = $1 ORDER BY born_at ASC`,
+    `SELECT * FROM hashimons WHERE owner_id = $1 AND archived_at IS NULL ORDER BY born_at ASC`,
     [ownerId]
   );
   return res.rows;

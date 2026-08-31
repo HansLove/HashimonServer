@@ -9,7 +9,10 @@ export const authRouter = Router();
 const registerSchema = z.object({
   username: z.string().min(1).max(20),
   password: z.string().min(8).max(200),
-  speciesKey: z.string().min(1).max(60),
+  //La fecha de nacimiento reemplaza al selector de especie: el jugador ya no
+  //elige elemento, familia ni cuerpo. El formato exacto lo valida
+  //core/birth-identity.ts (calendario real, 1900+, no futura).
+  dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "dob must be YYYY-MM-DD"),
   publicKey: z.string().min(66).max(66).optional(),
   custody: z.enum(["server_encrypted", "player"]).optional(),
 });
@@ -18,12 +21,9 @@ authRouter.post(
   "/register",
   asyncHandler(async (req, res) => {
     const input = registerSchema.parse(req.body ?? {});
-    //Enriched here, before the domain call, so a registration that dies on
-    //validation still says which species and key path it was attempting.
-    enrich({
-      species_key: input.speciesKey,
-      key_source: input.publicKey ? "client" : "generated",
-    });
+    //La FECHA NUNCA entra al evento. registerOwner enriquece con los derivados
+    //(espíritu, número de vida, elemento) en cuanto los calcula.
+    enrich({ key_source: input.publicKey ? "client" : "generated" });
     const result = await registerOwner(input);
     res.status(result.claimed ? 200 : 201).json({
       token: result.session.token,

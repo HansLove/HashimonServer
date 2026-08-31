@@ -19,6 +19,16 @@ import {
   type MiningJobRecord,
   type BitcoinShareSnapshot,
 } from "@/core/pow";
+import {
+  lifeNumberOf,
+  spiritOf,
+  birthIdentityOf,
+  isPlausibleDob,
+  genesisSpeciesKey,
+  ELEMENT_BY_LIFE,
+  SPIRITS,
+} from "@/core/birth-identity";
+import { Hashimons } from "@/data/species";
 
 const TEST_DNA = "deadbeef".repeat(8);
 
@@ -194,4 +204,73 @@ test("verifyJobShare rejects duplicate share hash", () => {
   seen.add(first.hash);
   const dup = verifyJobShare(job, TEST_DNA, submit, seen);
   assert.equal(dup.error, "duplicate_share");
+});
+
+// --- Birth Identity (caos-core@2) -----------------------------------------
+
+test("life number reduces digits and keeps 11/22/33 as masters", () => {
+  //El ejemplo del diseño: 1+9+9+6+0+1+0+6 = 32 -> 3+2 = 5.
+  assert.equal(lifeNumberOf("1996-01-06"), 5);
+  assert.equal(lifeNumberOf("2000-01-08"), 11); //suma exacta 11
+  assert.equal(lifeNumberOf("1979-12-29"), 4); //40 -> 4
+  //Este es el caso que separa las dos reglas posibles: 47 -> 11. Comprobando el
+  //maestro en cada paso se detiene en 11 (Eléctrico); comprobándolo sólo en el
+  //primer total seguiría a 2 (Aire). Medido, esa diferencia mueve a Eléctrico
+  //del 8.7% al 15.5% del padrón.
+  assert.equal(lifeNumberOf("1998-09-29"), 11);
+});
+
+test("every life number maps to exactly one genesis element", () => {
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 22, 33]) {
+    assert.ok(ELEMENT_BY_LIFE[n], `life number ${n} has no element`);
+  }
+  //El 5 es de Aire, no de Fuego: con el 5 en Fuego, Fuego se llevaba el 33.3%
+  //de los nacimientos medidos contra el 13.7% de Aire.
+  assert.equal(ELEMENT_BY_LIFE[5], "aire");
+});
+
+test("the solar window opens on the 21st and wraps across the year", () => {
+  assert.equal(spiritOf("1996-01-20"), "bloom");   //último día de la ventana anterior
+  assert.equal(spiritOf("1996-01-21"), "hearth");  //abre la primera ventana
+  assert.equal(spiritOf("1996-02-20"), "hearth");  //sigue abierta
+  assert.equal(spiritOf("1996-02-21"), "mirror");
+  assert.equal(spiritOf("1995-12-21"), "bloom");   //envuelve al año siguiente
+});
+
+test("birth identity is deterministic and independent of when it is computed", () => {
+  const a = birthIdentityOf("1996-01-06");
+  const b = birthIdentityOf("1996-01-06");
+  assert.deepEqual(a, b);
+  assert.equal(a.spirit, "bloom");
+  assert.equal(a.lifeNumber, 5);
+  assert.equal(a.element, "aire");
+  assert.equal(a.speciesKey, "g2_bloom_aire");
+  assert.equal(a.templateId, "template_g2_bloom_aire");
+});
+
+test("the twelve spirit lines cover the family space without overlap", () => {
+  const families = SPIRITS.flatMap((s) => s.line);
+  assert.equal(new Set(families).size, families.length, "a family belongs to two spirits");
+  //Un espíritu sin cuerpos instalables debe declarar pariente, o un mundo sin
+  //los packs opcionales dejaría esa fecha sin criatura.
+  for (const s of SPIRITS) { assert.ok(s.line.length > 0); }
+});
+
+test("dob validation rejects impossible and future dates", () => {
+  const now = new Date("2026-08-29T00:00:00Z");
+  assert.equal(isPlausibleDob("1996-01-06", now), true);
+  assert.equal(isPlausibleDob("2001-02-30", now), false); //no existe
+  assert.equal(isPlausibleDob("1996-1-6", now), false);   //formato
+  assert.equal(isPlausibleDob("1899-12-31", now), false); //antes de 1900
+  assert.equal(isPlausibleDob("2027-01-01", now), false); //futura
+  assert.equal(isPlausibleDob("2000-02-29", now), true);  //bisiesto real
+  assert.equal(isPlausibleDob("1900-02-29", now), false); //1900 no es bisiesto
+});
+
+test("a genesis species key round-trips to its spirit and element", () => {
+  for (const s of SPIRITS) {
+    const key = genesisSpeciesKey(s.key, "eléctrico");
+    assert.equal(key, `g2_${s.key}_electrico`);
+    assert.ok(Hashimons[key], `${key} is not in the emission allowlist`);
+  }
 });

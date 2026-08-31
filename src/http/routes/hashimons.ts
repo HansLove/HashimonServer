@@ -4,7 +4,7 @@ import { requireSession } from "@/http/auth";
 import { AppError, asyncHandler } from "@/http/errors";
 import { enrich } from "@/http/wide-event";
 import { canOwn } from "@/domain/players";
-import { emit, getForOwner, listByOwner, present, isGenesisSpecies, countStarterEmissions } from "@/domain/hashimons";
+import { emit, getForOwner, listByOwner, present, isGenesisSpecies } from "@/domain/hashimons";
 import { issueJob, jobResponse, submitShare } from "@/domain/mining";
 import { Hashimons } from "@/data/species";
 
@@ -52,14 +52,16 @@ hashimonsRouter.post(
     const isGenesis = isGenesisSpecies(input.speciesKey);
     enrich({ species_key: input.speciesKey, provenance, is_genesis: isGenesis });
     if (isGenesis) {
-      if (provenance !== "starter") {
-        throw new AppError(422, "genesis species require starter provenance", "genesis_provenance");
-      }
-      const starters = await countStarterEmissions(req.player!.id);
-      enrich({ starter_count: starters });
-      if (starters >= 1) {
-        throw new AppError(409, "starter already issued", "starter_limit");
-      }
+      //Desde caos-core@2 un Genesis NO se pide: lo fija la fecha de nacimiento
+      //en el registro (domain/players.ts::registerOwner). Aceptar una
+      //speciesKey Genesis por el cuerpo de la petición sería devolverle al
+      //cliente exactamente la elección que el sistema le quitó — y además le
+      //dejaría escoger espíritu y elemento sin pasar por su fecha.
+      throw new AppError(
+        422,
+        "a genesis is issued by your birth date at registration, not requested",
+        "genesis_not_requestable"
+      );
     }
     const row = await emit({
       ownerId: req.player!.id,

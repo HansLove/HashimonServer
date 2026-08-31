@@ -22,7 +22,8 @@ pnpm install          # package manager is pnpm — enforced via preinstall (onl
 pnpm dev               # tsx watch src/server.ts
 pnpm build             # tsc --noEmit, then esbuild bundle to dist/, copies schema.sql
 pnpm start             # node dist/server.js (run build first)
-pnpm migrate           # node dist/db/migrate.js — applies schema.sql (idempotent)
+pnpm migrate:dev       # applies src/db/schema.sql directly — USE THIS in development
+pnpm migrate           # node dist/db/migrate.js — applies dist/db/schema.sql (idempotent)
 pnpm typecheck         # tsc --noEmit
 pnpm test              # node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts
 ```
@@ -33,6 +34,14 @@ own `--test-name-pattern`).
 
 Requires Node ≥ 20 and Postgres ≥ 13 (`gen_random_uuid`). `cp .env.example .env`
 before running migrate/dev.
+
+**`pnpm migrate` applies the copy in `dist/`, not `src/db/schema.sql`.** `pnpm build`
+is what refreshes that copy (`cp src/db/schema.sql dist/db/schema.sql`), so running
+`pnpm migrate` against a stale `dist/` applies an OLD schema and still prints
+`✓ schema applied` — a silent failure that surfaces later as
+`column "…" of relation "players" does not exist`. In development use
+**`pnpm migrate:dev`**, which reads `src/` directly. Either way the script now prints
+which file it read.
 
 ## Architecture
 

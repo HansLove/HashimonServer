@@ -15,8 +15,8 @@ import {
   luantiSrpVerify,
   type Custody,
 } from "@/domain/crypto";
-import { emit, isGenesisSpecies, present, type HashimonRow } from "@/domain/hashimons";
-import { Hashimons } from "@/data/species";
+import { emit, present, type HashimonRow } from "@/domain/hashimons";
+import { birthIdentityOf, isPlausibleDob, type BirthIdentity } from "@/core/birth-identity";
 
 export interface Player {
   id: string;
@@ -31,6 +31,12 @@ export interface Player {
   kdf_salt: string | null;
   kdf_params: Record<string, unknown> | null;
   custody: string | null;
+  //Birth Identity V2. La fecha que los produjo NO se guarda.
+  birth_spirit: string | null;
+  life_number: number | null;
+  genesis_element: string | null;
+  birth_version: number | null;
+  birth_set_at: string | null;
 }
 
 /** Ownership requires a secp256k1 public key (web register). Guests have none. */
@@ -47,6 +53,12 @@ export function presentPlayer(player: Player) {
     credits: player.credits,
     custody: player.custody,
     canOwn: canOwn(player),
+    //El destino compartido. lifeNumber va aparte a propósito: publicarlo junto
+    //al espíritu deja la fecha real en ~3 candidatos si se conoce el año
+    //(medido sobre 1970-2018), contra ~31 publicando sólo el espíritu.
+    birthSpirit: player.birth_spirit,
+    genesisElement: player.genesis_element,
+    lifeNumber: player.life_number,
   };
 }
 
@@ -111,10 +123,17 @@ export async function playerForToken(token: string): Promise<Player | null> {
   return res.rows[0] ?? null;
 }
 
+//El registro ya no pregunta qué quieres ser. Pregunta cuándo naciste.
+//
+//    Fecha    -> destino compartido  (espíritu, número de vida, elemento, especie)
+//    Servidor -> individuo singular  (DNA: color, proporciones, cuerpo destino)
+//
+//Dos personas nacidas el mismo día reciben la misma especie y no comparten ni
+//un color. Eso es intencional: si todo individuo es único, nada es reconocible.
 export async function registerOwner(input: {
   username: string;
   password: string;
-  speciesKey: string;
+  dob: string;
   publicKey?: string;
   custody?: Custody;
 }): Promise<{
@@ -131,9 +150,12 @@ export async function registerOwner(input: {
   if (input.password.length < 8) {
     throw new AppError(422, "password must be at least 8 characters", "invalid_password");
   }
-  if (!isGenesisSpecies(input.speciesKey) || !Hashimons[input.speciesKey]) {
-    throw new AppError(422, "speciesKey must be a genesis starter element", "invalid_species");
+  if (!isPlausibleDob(input.dob)) {
+    throw new AppError(422, "dob must be a real calendar date (YYYY-MM-DD), 1900 or later, not in the future", "invalid_dob");
   }
+  const identity = birthIdentityOf(input.dob);
+  //Sólo los derivados llegan al log. La fecha nunca.
+  enrich({ birth_spirit: identity.spirit, life_number: identity.lifeNumber, genesis_element: identity.element });
 
   const existing = await getPlayerByUsername(username);
   if (existing) {
@@ -142,7 +164,7 @@ export async function registerOwner(input: {
     if (existing.password_hash || existing.public_key) {
       throw new AppError(409, "username already registered", "username_taken");
     }
-    return claimLuantiGuest(existing, input);
+    return claimLuantiGuest(existing, input, identity);
   }
 
   const keyMaterial = await deriveOwnerKeyMaterial(input);
@@ -159,8 +181,9 @@ export async function registerOwner(input: {
     const inserted = await query<Player>(
       `INSERT INTO players (
          username, password_hash, luanti_password, public_key, display_name,
-         enc_private_key, kdf_salt, kdf_params, custody
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+         enc_private_key, kdf_salt, kdf_params, custody,
+         birth_spirit, life_number, genesis_element, birth_version, birth_set_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, now())
        RETURNING *`,
       [
         username,
@@ -172,6 +195,10 @@ export async function registerOwner(input: {
         keyMaterial.kdfSalt,
         keyMaterial.kdfParams ? JSON.stringify(keyMaterial.kdfParams) : null,
         keyMaterial.custody,
+        identity.spirit,
+        identity.lifeNumber,
+        identity.element,
+        identity.version,
       ]
     );
     player = inserted.rows[0]!;
@@ -185,7 +212,7 @@ export async function registerOwner(input: {
     throw err;
   }
 
-  const { session, hashimon } = await emitStarterAndBindSession(player, input.speciesKey, () =>
+  const { session, hashimon } = await emitStarterAndBindSession(player, identity, () =>
     query(`DELETE FROM players WHERE id = $1`, [player.id])
   );
   return { player, session, hashimon, created: true, claimed: false };
@@ -197,7 +224,8 @@ export async function registerOwner(input: {
  *  SRP entry the engine built for it in-game. */
 async function claimLuantiGuest(
   existing: Player,
-  input: { password: string; speciesKey: string; publicKey?: string; custody?: Custody }
+  input: { password: string; publicKey?: string; custody?: Custody },
+  identity: BirthIdentity
 ): Promise<{
   player: Player;
   session: Session;
@@ -222,7 +250,9 @@ async function claimLuantiGuest(
     const claimedRow = await query<Player>(
       `UPDATE players
           SET password_hash = $2, public_key = $3, enc_private_key = $4,
-              kdf_salt = $5, kdf_params = $6::jsonb, custody = $7
+              kdf_salt = $5, kdf_params = $6::jsonb, custody = $7,
+              birth_spirit = $8, life_number = $9, genesis_element = $10,
+              birth_version = $11, birth_set_at = now()
         WHERE id = $1 AND password_hash IS NULL AND public_key IS NULL
         RETURNING *`,
       [
@@ -233,6 +263,10 @@ async function claimLuantiGuest(
         keyMaterial.kdfSalt,
         keyMaterial.kdfParams ? JSON.stringify(keyMaterial.kdfParams) : null,
         keyMaterial.custody,
+        identity.spirit,
+        identity.lifeNumber,
+        identity.element,
+        identity.version,
       ]
     );
     const row = claimedRow.rows[0];
@@ -249,11 +283,13 @@ async function claimLuantiGuest(
     throw err;
   }
 
-  const { session, hashimon } = await emitStarterAndBindSession(player, input.speciesKey, () =>
+  const { session, hashimon } = await emitStarterAndBindSession(player, identity, () =>
     query(
       `UPDATE players
           SET password_hash = NULL, public_key = NULL, enc_private_key = NULL,
-              kdf_salt = NULL, kdf_params = NULL, custody = NULL
+              kdf_salt = NULL, kdf_params = NULL, custody = NULL,
+              birth_spirit = NULL, life_number = NULL, genesis_element = NULL,
+              birth_version = NULL, birth_set_at = NULL
         WHERE id = $1`,
       [player.id]
     )
@@ -316,14 +352,17 @@ async function deriveOwnerKeyMaterial(input: {
  *  for a claimed one (deleting it would destroy a pre-existing Luanti account). */
 async function emitStarterAndBindSession(
   player: Player,
-  speciesKey: string,
+  identity: BirthIdentity,
   compensate: () => Promise<unknown>
 ): Promise<{ session: Session; hashimon: ReturnType<typeof present> }> {
   try {
     const row: HashimonRow = await emit({
       ownerId: player.id,
-      speciesKey,
+      speciesKey: identity.speciesKey,
+      templateId: identity.templateId,
       provenance: "starter",
+      birthSpirit: identity.spirit,
+      lifeNumber: identity.lifeNumber,
     });
     const session = await createSession(player.id);
     enrich({ player_id: player.id, starter_emitted: true });
@@ -335,6 +374,71 @@ async function emitStarterAndBindSession(
     await compensate().catch(() => {});
     throw err;
   }
+}
+
+//Renacimiento V1 -> V2: le da su Birth Identity a una cuenta que se registró
+//cuando la especie todavía se elegía a mano.
+//
+//La criatura vieja se ARCHIVA, jamás se reescribe. El PoW está ligado al DNA y
+//el speciesKey entra en el preimagen del DNA, así que cambiar la especie in
+//situ haría que cada share almacenado dejara de verificar y present() la
+//reportaría como adulterada. Archivada conserva su DNA original y sigue
+//verificando para siempre — simplemente deja de ser tu Genesis activo.
+//
+//El precio, y hay que decirlo claro: la nueva criatura nace en stage 1. La
+//biografía de trabajo no se transfiere porque no PUEDE transferirse; ese es
+//exactamente el rigor que hace verificable al sistema.
+export async function rebirthWithBirthDate(
+  player: Player,
+  dob: string
+): Promise<{ hashimon: ReturnType<typeof present>; archived: number; identity: BirthIdentity }> {
+  if (!canOwn(player)) {
+    throw new AppError(403, "cannot own without a public key — register on the web", "cannot_own");
+  }
+  //Anti-reroll. Sin esto, un jugador podría probar fechas hasta sacar el
+  //espíritu que quería, que es justo lo que el sistema quita.
+  if (player.birth_spirit) {
+    throw new AppError(409, "birth identity already set and cannot be changed", "birth_already_set");
+  }
+  if (!isPlausibleDob(dob)) {
+    throw new AppError(422, "dob must be a real calendar date (YYYY-MM-DD), 1900 or later, not in the future", "invalid_dob");
+  }
+
+  const identity = birthIdentityOf(dob);
+  enrich({ birth_spirit: identity.spirit, life_number: identity.lifeNumber, genesis_element: identity.element });
+
+  //La condición birth_spirit IS NULL cierra la carrera entre dos renacimientos
+  //simultáneos: el segundo no actualiza ninguna fila y se rechaza. Mismo patrón
+  //que claimLuantiGuest.
+  const claimed = await query<Player>(
+    `UPDATE players
+        SET birth_spirit = $2, life_number = $3, genesis_element = $4,
+            birth_version = $5, birth_set_at = now()
+      WHERE id = $1 AND birth_spirit IS NULL
+      RETURNING *`,
+    [player.id, identity.spirit, identity.lifeNumber, identity.element, identity.version]
+  );
+  if (!claimed.rows[0]) {
+    throw new AppError(409, "birth identity already set and cannot be changed", "birth_already_set");
+  }
+
+  const archived = await query(
+    `UPDATE hashimons
+        SET archived_at = now(), archive_reason = 'rebirth_v2'
+      WHERE owner_id = $1 AND archived_at IS NULL AND provenance = 'starter'`,
+    [player.id]
+  );
+
+  const row = await emit({
+    ownerId: player.id,
+    speciesKey: identity.speciesKey,
+    templateId: identity.templateId,
+    provenance: "starter",
+    birthSpirit: identity.spirit,
+    lifeNumber: identity.lifeNumber,
+  });
+  enrich({ rebirth_archived: archived.rowCount ?? 0, hashimon_id: row.id });
+  return { hashimon: present(row), archived: archived.rowCount ?? 0, identity };
 }
 
 export async function loginOwner(username: string, password: string): Promise<{

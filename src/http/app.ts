@@ -5,10 +5,12 @@ import { config } from "@/config";
 import { healthRouter } from "@/http/routes/health";
 import { sessionRouter } from "@/http/routes/session";
 import { profileRouter } from "@/http/routes/profile";
+import { territoryRouter } from "@/http/routes/territory";
 import { hashimonsRouter } from "@/http/routes/hashimons";
 import { authRouter } from "@/http/routes/auth";
 import { internalRouter } from "@/http/routes/internal";
 import { walletRouter } from "@/http/routes/wallet";
+import { magiRouter } from "@/http/routes/magi";
 import { errorMiddleware } from "@/http/errors";
 import { wideEventMiddleware } from "@/http/wide-event";
 
@@ -34,8 +36,10 @@ export function createApp(logger?: Logger) {
   app.use(sessionRouter);
   app.use(authRouter);
   app.use(profileRouter);
+  app.use(territoryRouter);
   app.use(hashimonsRouter);
   app.use(walletRouter);
+  app.use(magiRouter);
   app.use(internalRouter);
 
   app.use((_req, res) => {

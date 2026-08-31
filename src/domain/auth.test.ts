@@ -116,7 +116,7 @@ describe("Luanti guest login and claim (against the local DB)", () => {
     const claimed = await registerOwner({
       username,
       password: "correct-horse-2",
-      speciesKey: "genesis_fuego",
+      dob: "1996-01-06",
     });
     assert.equal(claimed.claimed, true);
     assert.equal(canOwn(claimed.player), true);
@@ -130,7 +130,7 @@ describe("Luanti guest login and claim (against the local DB)", () => {
 
     // Now claimed: the same endpoint refuses to claim it a second time.
     await assert.rejects(
-      registerOwner({ username, password: "correct-horse-2", speciesKey: "genesis_fuego" }),
+      registerOwner({ username, password: "correct-horse-2", dob: "1996-01-06" }),
       rejectsWithCode("username_taken")
     );
   });
@@ -140,7 +140,7 @@ describe("Luanti guest login and claim (against the local DB)", () => {
     await registerLuantiGuest(username, luantiSrpEntry(username, "correct-horse-3"));
 
     await assert.rejects(
-      registerOwner({ username, password: "totally-wrong-pw", speciesKey: "genesis_fuego" }),
+      registerOwner({ username, password: "totally-wrong-pw", dob: "1996-01-06" }),
       rejectsWithCode("username_taken")
     );
   });
