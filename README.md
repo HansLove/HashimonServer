@@ -365,12 +365,35 @@ failed | expired`. As with payments, the client runs no state machine — the ph
 the tab has to find the outcome when they come back.
 
 **Nothing the pool reports is believed.** Every mark is re-hashed from the template
-delivered with it (`hashBitcoinJob`), and counted only if two independent checks hold: the
-rebuilt header hashes to the hash claimed, **and** the coinbase — which the merkle root
-commits to — carries this creature's DNA. The second is what stops a pool billing one player
-for another's work, or replaying one mark across every creature it ever mined for. The
-delivered mark is stored in `hashimons.best_share_bitcoin`, so `present()` re-verifies it on
-every read exactly like a browser-mined one; `verified` is `true` or the mark is not there.
+delivered with it (`hashBitcoinJob`), and counted only if three independent checks hold: the
+rebuilt header hashes to the hash claimed, the coinbase — which the merkle root commits to —
+carries this creature's DNA, **and** the recomputed hash clears the star floor the lot
+bought. The second stops a pool billing one player for another's work, or replaying one mark
+across every creature it ever mined for. The third is what makes a mark worth paying for at
+all: the first two prove a mark is *ours*, not that it cost anything, and a header with
+`nonce: 0` carrying the right DNA passes both. Without the floor a pool could deliver fifty
+of those, close the lot `complete`, owe no refund, and leave the creature untouched. The
+floor is measured on the recomputed hash — `stars` and `leadingZeros` ride in the payload and
+are worth exactly as much as any other number a pool reports.
+
+`caos_lots.stars_requested` carries that floor per lot, snapshotted at creation for the same
+reason `payments` snapshots its price: changing the product's floor must never revalue a lot
+already open. The delivered mark is stored in `hashimons.best_share_bitcoin`, so `present()`
+re-verifies it on every read exactly like a browser-mined one; `verified` is `true` or the
+mark is not there.
+
+**`mutated` is recorded by the mark that caused it**, never derived on read. It means the
+creature's *star* count rose — four bits buy one star, so most new records are invisible on
+the creature sheet, and `mutación` is the one word the vocabulary rules do not allow to be
+approximate. Deriving it from `stars_before` would have been wrong: that number is frozen
+when the lot opens, and a player who keeps incubating in the browser meanwhile leaves it
+behind, so a mark the creature had already beaten would still compare favourably against it.
+
+**The delivery count decides how a lot closes.** CaosEngine's own label can agree with the
+ledger or lower it, never raise it: a batch it calls `completed` whose marks did not all
+reach us — three exhausted webhook retries is enough — closes `partial` here, because the
+refund is computed from that same count and a lot cannot be complete and owe money back at
+once.
 
 Three guarantees are SQL, not `if`s (`src/db/schema.sql`):
 
@@ -383,7 +406,17 @@ Three guarantees are SQL, not `if`s (`src/db/schema.sql`):
   lot cannot be counted twice even under two different hashes. CaosEngine redelivers; a
   repeat is the normal case.
 - **a refund paid once** — `UPDATE … WHERE status = ANY(live) RETURNING *`. The redelivered
-  close event lands on zero rows.
+  close event lands on zero rows. `applyShare`'s own lot UPDATE carries the same guard, and
+  it is not decoration: a mark that arrives after a stale sweep or a close settled the lot
+  would otherwise put it back into `mining`, and a resurrected lot passes the refund's live
+  check a second time. That mark is rolled back whole — a delivery after the lot is settled
+  leaves no trace of having been counted.
+- **a record that only moves up** — the creature's `best_share_*` columns are decided in the
+  UPDATE itself (`CASE WHEN $2 > best_share_bits`), against the column and never against a
+  value read before the transaction opened. A player browser-incubating while their lot runs
+  is two writers on one creature, and the loser of that race must not be able to overwrite a
+  better mark with a worse one. The row is also taken `FOR UPDATE` first, so the star count
+  before and after come from one view of it.
 
 **Refunds are proportional to what was actually paid**: undelivered marks come back at the
 lot's own price, discount included (3 of 10 on a 98-credit lot returns 69). CaosEngine does
@@ -442,6 +475,13 @@ lot with nowhere to send the work.
   the event, not a longer timeout.
 - **The stale sweep runs on read paths, not on a schedule.** A lot belonging to a player who
   never comes back stays live until someone reads it. It blocks only that player.
+- **That sweep is an unindexed scan on a polling endpoint.** `expireStaleLots` runs on every
+  `GET /hashimons/:id/incubation`, and its `OR` of two predicates over `created_at` and
+  `assigned_at` is not supported by an index of its own — so as terminal lots accumulate,
+  each poll pays to sweep every other player's rot. `caos_lots_active_per_player_idx` covers
+  the live rows, which are the tiny minority, but the `OR` will still seq-scan. Fine at the
+  current ledger size; the fix is a partial index over the live statuses, or scoping the
+  sweep to the player being read the way `expireStaleCharges` does.
 - **No reconciliation against CaosEngine.** If every delivery of a batch is lost, the lot
   expires and refunds in full — the player is made whole, but the marks are paid for and gone.
 
@@ -495,7 +535,13 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
   accepted and a forged hash / swapped merkle branch / wrong creature all rejected, the
   per-player index rejecting a second lot (charging nothing), redelivery not double-counting,
   a partial close refunding exactly once, a queued lot swept and refunded in full, and an
-  `assigned` lot surviving five minutes but not three hours.
+  `assigned` lot surviving five minutes but not three hours. Plus: a genuine, correctly
+  committed mark that did no work refused as `below_floor` while the lot stays open; the
+  pool's claimed `stars` ignored in favour of the recomputed hash; a mark arriving after the
+  lot settled refused and rolled back whole, with the refund not paid twice; a weaker mark
+  failing to displace the creature's record; no `mutación` claimed for a mark the creature
+  had already beaten, and one reported when a mark really crosses a star; and a batch id
+  still claimed when the first mark beat the 202 to the row.
 - Incubation smoke (running server, local Postgres, no CaosEngine): `/incubation/pricing`
   publishes the ladder net of discounts; the golden vector delivered to
   `/incubation/webhook/:lotSecret` → `accepted`, repeated → `duplicate`, and

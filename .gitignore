@@ -1,8 +1,8 @@
 node_modules/
-.env
 *.log
 dist/
 .DS_Store
 .secrets
 .claude/worktrees/
 CLAUDE.local.md
+config.bat
