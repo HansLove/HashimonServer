@@ -11,10 +11,17 @@ creatures or decides outcomes — it holds the emission ledger (who owns what) a
 full rationale.
 
 Phase 1 (current) scope: identity + inventory + emission ledger + bound-mode PoW
-mining, plus buying credits with Bitcoin through BTCPay. Real proof-of-work submission
-against a live bitcoin/pool target, incubation / Caos Engine seeding, a *sink* for those
-credits, and an MCP layer are later phases layered on top of this — do not build them
+mining, buying credits with Bitcoin through BTCPay, and the first sink for those credits —
+assisted incubation, where CaosEngine's pool mines high-entropy shares for a creature.
+Real proof-of-work submission against a live bitcoin/pool target, Caos Engine encounter
+seeding, and an MCP layer are later phases layered on top of this — do not build them
 speculatively.
+
+**Player-facing vocabulary for incubation is fixed and narrow.** Never mining, miner,
+hardware, hashrate, share, bits or PoW in anything a player reads: it is *encubar*,
+*encubación asistida*, *incubadora*, *marca*, *estrellas*, and the outcome is a *mutación*,
+never an "evolution" or an "improvement". Inside the code and in these docs `share` stays
+the technical term.
 
 ## Commands
 
@@ -60,7 +67,8 @@ src/domain/   Business logic: players.ts (identity + bearer sessions), hashimons
               (emission/birth, inventory, present() derived view), mining.ts (PoW job
               issuance + share submission), credit-plans.ts (the catalogue — where a
               price comes from), payments.ts (charges + webhook transitions),
-              audit.ts (append-only log), crypto.ts.
+              incubation.ts (the lot ledger — the credit sink), caos-client.ts (the
+              single outbound call), audit.ts (append-only log), crypto.ts.
 src/http/     app.ts (express wiring), auth.ts (requireSession bearer gate), errors.ts
               (AppError + errorMiddleware), routes/ (one router per resource).
 src/server.ts Entry point.
@@ -166,6 +174,41 @@ a 500, which tells BTCPay to keep retrying a delivery that can never be accepted
 `domain/payments.ts` builds its own `BTCPayClient` lazily (not at import: `migrate.ts` and
 the test suites load domain code with no gateway configured).
 
+**Assisted incubation (`src/domain/incubation.ts`, `caos_pricing` + `caos_lots`).** The
+credit sink, and the second and last mover of `players.credits`. A request carries a
+**count, never an amount**; `GET /incubation/pricing` publishes the ladder **already net of
+the tier discount** (10-24 arrives as `9.8`, not `10` + `2%`) so a client cannot apply it
+twice. Seven server-decided statuses — `queued → assigned → mining → complete | partial |
+failed | expired` — and, as with payments, the client's UI phase *is* that column.
+
+**Nothing the pool reports is believed.** `verifyShare` re-hashes every mark from the
+template shipped with it and counts it only if both hold: the rebuilt header matches the
+claimed hash, **and** the coinbase (which the merkle root commits to) carries this
+creature's DNA. Drop the second check and a pool can bill one player for another's work,
+or replay one mark across every creature it ever mined for. The mark is stored in
+`hashimons.best_share_bitcoin` — carrying spoon's own `extranonce1`/`extranonce2`, which
+are *not* derivable from the DNA — so `present()` re-verifies it like any browser share.
+
+Three guarantees are SQL, not `if`s: `caos_lots_active_per_player_idx` (stricter than the
+product's one-lot-per-creature rule, so it subsumes it) turns a second POST into 409
+`incubation_pending` *with the live lot in the body*; `submitted_shares`' hash PK plus
+`submitted_shares_lot_index_idx` make a redelivered mark a no-op; and `closeLotById`'s
+`UPDATE … WHERE status = ANY(live) RETURNING *` pays a refund once. Refunds are
+**proportional to what was actually paid**, discount included, and counted from the ledger's
+own delivered marks — never from the number the pool reports.
+
+**The lot's hour starts at `assigned_at`, never `created_at`.** A lot queued on CaosEngine's
+side for lack of supply must not refund itself for waiting. Accepted approximation: CaosEngine
+has no assignment event, so the clock starts at its 202 — fix that with the event, not a
+longer timeout. `expireStaleLots` also sweeps a `queued` lot whose outbound POST never
+happened (written off in full), which would otherwise hold the index forever.
+
+**CaosEngine does not sign its webhooks.** The lot's 32-byte secret in the URL is the whole
+credential, and `incubation-webhook.ts` is therefore mounted *after* `express.json()` — there
+are no raw bytes to preserve. Accepted knowingly: a forged mark still has to solve the proof
+of work, and a forged close only ever refunds the player early. Never log the secret
+(`REDACT_PATHS` covers `webhook_secret`/`lotSecret`).
+
 **Logging is one wide event per request.** `src/http/wide-event.ts` holds an
 `AsyncLocalStorage<WideEvent>`; `wideEventMiddleware` (mounted first in `http/app.ts`) is
 the *only* thing that emits a request log line, in `res.on("finish")`. Everything else
@@ -204,4 +247,6 @@ bridge, not production-grade wallet custody as-is.
 
 Three gaps are recorded, not closed — see *Known gaps in the payment flow* in README.md:
 no reconciliation sweeper against BTCPay, cancel does not archive the gateway invoice, and
-buying is gated by `requireSession` alone rather than `canOwn`.
+buying is gated by `requireSession` alone rather than `canOwn`. Incubation has its own four
+(unsigned webhook, `assigned` inferred from the 202, sweep on read paths rather than a
+schedule, no reconciliation against CaosEngine) — *Known gaps in the incubation flow*.
