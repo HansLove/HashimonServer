@@ -10,11 +10,13 @@ import {
   presentLot,
   quoteFor,
   refundFor,
+  snapshotOf,
   statusForTermination,
   verifyShare,
   type CaosSharePayload,
   type LotRow,
 } from "@/domain/incubation";
+import { hashBitcoinJob } from "@/core/index";
 import { present } from "@/domain/hashimons";
 import { pool, query } from "@/db/pool";
 import { AppError } from "@/http/errors";
@@ -49,6 +51,28 @@ function goldenShare(overrides: Partial<CaosSharePayload> = {}): CaosSharePayloa
     sharesTotal: 1,
     ...overrides,
   };
+}
+
+//A creature the golden coinbase also commits to. The DNA check is a substring test over
+//prefix+extranonces+suffix, so any 64-hex window of that coinbase is a DNA this one mark
+//legitimately proves work for — which is what lets more than one test own a *verifiable*
+//mark despite hashimons.dna being UNIQUE.
+function committedDna(offset: number): string {
+  return goldenShare().coinbaseSuffix.slice(offset, offset + 64);
+}
+
+//The golden template with a different nonce, and the hash recomputed the way spoon would
+//have. submitted_shares.hash is a GLOBAL primary key, so two tests replaying the vector
+//verbatim would make the second one a redelivery before reaching what it means to test.
+function minedShare(nonce: number, overrides: Partial<CaosSharePayload> = {}): CaosSharePayload {
+  const base = goldenShare({ nonce, ...overrides });
+  const { hashBE } = hashBitcoinJob({
+    ...snapshotOf(base),
+    extranonce1: base.extranonce1,
+    extranonce2: base.extranonce2,
+    nonceHex: nonce.toString(16).padStart(8, "0"),
+  });
+  return { ...base, hash: hashBE };
 }
 
 describe("the price ladder", () => {
@@ -319,6 +343,55 @@ describe("the lot ledger (against the local DB)", () => {
     assert.equal(after.rows[0]!.shares_delivered, 0);
   });
 
+
+  //The race the WHERE clause exists for: the caller holds a row that was live when it was
+  //read, and the lot settled underneath it. Without the guard the UPDATE would put the lot
+  //back into `mining`, and a resurrected lot pays its refund a second time.
+  it("refuses a mark that arrives after the lot settled, and records nothing", async () => {
+    const { playerId, lot } = await openLot(10, 500, committedDna(0));
+    //Closed behind the caller's back; `lot` is the stale row it is still holding.
+    await closeLotById(lot.id, "partial", "test_race");
+    const creditsAfterClose = await creditsOf(playerId);
+
+    const result = await applyShare(lot, minedShare(7));
+    assert.deepEqual(result, { ok: false, error: "lot_closed" });
+
+    const after = await query<{ status: string; shares_delivered: number; closed_at: Date | null }>(
+      `SELECT status, shares_delivered, closed_at FROM caos_lots WHERE id = $1`,
+      [lot.id]
+    );
+    assert.equal(after.rows[0]!.status, "partial");
+    assert.equal(after.rows[0]!.shares_delivered, 0);
+    assert.notEqual(after.rows[0]!.closed_at, null);
+    //And the whole transaction rolled back: no share row survived the refusal.
+    const shares = await query(`SELECT 1 FROM submitted_shares WHERE caos_lot_id = $1`, [lot.id]);
+    assert.equal(shares.rows.length, 0);
+    //Most of all: the refund was not paid twice.
+    assert.equal(await creditsOf(playerId), creditsAfterClose);
+  });
+
+  //The creature's record moves only upward. The comparison lives in the UPDATE precisely so
+  //a second writer — the player browser-mining while the lot runs — cannot lose a better
+  //mark to a worse one that read the old value first.
+  it("does not let a weaker mark displace the creature's record", async () => {
+    const { hashimonId, lot } = await openLot(1, 500, committedDna(2), 20);
+    const applied = await applyShare(lot, minedShare(11));
+    assert.equal(applied.ok, true);
+    assert.ok(applied.ok && !applied.duplicate && applied.isNewBest === false);
+
+    const after = await query<{ best_share_bits: number; best_share_hash: string | null; valid_shares: number }>(
+      `SELECT best_share_bits, best_share_hash, valid_shares FROM hashimons WHERE id = $1`,
+      [hashimonId]
+    );
+    //The 3-bit mark counted as delivery and raised valid_shares, but the record is untouched.
+    assert.equal(after.rows[0]!.best_share_bits, 20);
+    assert.equal(after.rows[0]!.best_share_hash, null);
+    assert.equal(after.rows[0]!.valid_shares, 1);
+    //The lot still records it as its own best: the lot's ladder and the creature's are
+    //different questions, and this mark is the best THIS lot delivered.
+    assert.ok(applied.ok && !applied.duplicate && applied.lot.best_bits !== null);
+    assert.ok(applied.ok && !applied.duplicate && applied.lot.best_bits! < 20);
+  });
 
   it("refunds the undelivered marks on a partial close, exactly once", async () => {
     const { playerId, lot } = await openLot(10, 500, "a6".repeat(32));

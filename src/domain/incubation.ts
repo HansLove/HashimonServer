@@ -492,6 +492,28 @@ export async function applyShare(lot: LotRow, payload: CaosSharePayload): Promis
     return { ok: false, error: verdict.error };
   }
 
+  try {
+    return await applyVerifiedShare(lot, payload, row, verdict);
+  } catch (err: unknown) {
+    if (err instanceof LotClosedDuringApply) {
+      enrich({ share_reject_reason: "lot_closed", lot_id: lot.id });
+      return { ok: false, error: "lot_closed" };
+    }
+    throw err;
+  }
+}
+
+/** Thrown from inside the transaction to roll it back when the lot turned out to be settled
+ *  after all. Not an AppError: a mark the ledger declines is answered 200, like every other
+ *  refusal on that webhook — it is a decision, not a delivery failure. */
+class LotClosedDuringApply extends Error {}
+
+async function applyVerifiedShare(
+  lot: LotRow,
+  payload: CaosSharePayload,
+  row: { id: string; dna: string; best_share_bits: number },
+  verdict: Extract<ShareVerdict, { ok: true }>
+): Promise<ApplyShareResult> {
   return withTransaction(async (client: DbClient) => {
     //ON CONFLICT DO NOTHING over BOTH doors: the global hash PK, and this lot's position.
     //An empty result means we have already counted this mark — say so and change nothing.
@@ -509,23 +531,27 @@ export async function applyShare(lot: LotRow, payload: CaosSharePayload): Promis
       return { ok: true as const, duplicate: true as const, lot };
     }
 
-    const isNewBest = verdict.bits > row.best_share_bits;
-    if (isNewBest) {
-      await query(
-        `UPDATE hashimons SET
-           valid_shares = valid_shares + 1,
-           best_share_bits = $2,
-           best_share_hash = $3,
-           best_share_nonce = $4,
-           best_share_extranonce2 = NULL,
-           best_share_bitcoin = $5
-         WHERE id = $1`,
-        [row.id, verdict.bits, payload.hash, payload.nonce, JSON.stringify(verdict.snapshot)],
-        client
-      );
-    } else {
-      await query(`UPDATE hashimons SET valid_shares = valid_shares + 1 WHERE id = $1`, [row.id], client);
-    }
+    //The record is decided against the COLUMN, never against the value read before the
+    //transaction opened. A player browser-mining while their lot runs is two writers on one
+    //creature, and comparing against a stale read lets the slower one overwrite a better
+    //mark with a worse one. Every branch below reads the same pre-UPDATE best_share_bits, so
+    //the whole row moves together or not at all.
+    const bested = await query<{ is_new_best: boolean }>(
+      `UPDATE hashimons SET
+         valid_shares = valid_shares + 1,
+         best_share_hash = CASE WHEN $2 > best_share_bits THEN $3 ELSE best_share_hash END,
+         best_share_nonce = CASE WHEN $2 > best_share_bits THEN $4 ELSE best_share_nonce END,
+         best_share_extranonce2 = CASE WHEN $2 > best_share_bits THEN NULL ELSE best_share_extranonce2 END,
+         best_share_bitcoin = CASE WHEN $2 > best_share_bits THEN $5 ELSE best_share_bitcoin END,
+         best_share_bits = GREATEST(best_share_bits, $2)
+       WHERE id = $1
+       RETURNING (best_share_hash = $3) AS is_new_best`,
+      [row.id, verdict.bits, payload.hash, payload.nonce, JSON.stringify(verdict.snapshot)],
+      client
+    );
+    //Safe as an identity test: the hash was just inserted into submitted_shares, whose PK is
+    //global, so no earlier mark on any creature can be carrying it.
+    const isNewBest = bested.rows[0]?.is_new_best === true;
 
     //The lot closes itself the moment the last mark lands. Waiting for CaosEngine's closing
     //event would leave a finished lot sitting in `mining`, blocking the player's next one.
@@ -539,12 +565,20 @@ export async function applyShare(lot: LotRow, payload: CaosSharePayload): Promis
          assigned_at = COALESCE(assigned_at, now()),
          status = CASE WHEN shares_delivered + 1 >= shares_requested THEN 'complete' ELSE 'mining' END,
          closed_at = CASE WHEN shares_delivered + 1 >= shares_requested THEN now() ELSE closed_at END
-       WHERE id = $1
+       WHERE id = $1 AND status = ANY($4::text[])
        RETURNING *`,
-      [lot.id, verdict.bits, payload.shareIndex],
+      [lot.id, verdict.bits, payload.shareIndex, LIVE_STATUSES],
       client
     );
-    const lotAfter = updated.rows[0]!;
+    //The live check at the top of this function read a row that a stale sweep or a closing
+    //event may have terminated since. Without the guard in the WHERE, this UPDATE would put
+    //a closed lot back into `mining` — and a resurrected lot passes closeLotById's own live
+    //check a second time, paying its refund twice. Roll back: a mark that arrives after the
+    //lot is settled is not delivery, and must leave no trace of having been counted.
+    const lotAfter = updated.rows[0];
+    if (!lotAfter) {
+      throw new LotClosedDuringApply();
+    }
 
     await audit(client, {
       playerId: lot.owner_id,
