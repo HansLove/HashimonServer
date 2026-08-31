@@ -7,6 +7,7 @@ import {
   closeLotById,
   createLot,
   lotForHashimon,
+  markAssigned,
   presentLot,
   quoteFor,
   refundFor,
@@ -409,6 +410,23 @@ describe("the lot ledger (against the local DB)", () => {
     //different questions, and this mark is the best THIS lot delivered.
     assert.ok(applied.ok && !applied.duplicate && applied.lot.best_bits !== null);
     assert.ok(applied.ok && !applied.duplicate && applied.lot.best_bits! < 20);
+  });
+
+  //CaosEngine answers 202 and starts delivering; the first mark can beat our own UPDATE to
+  //the row. The batch id has to land anyway — it is the only thing tying this lot to that
+  //batch, and without it marks from any batch would be accepted here forever.
+  it("stores the batch id even when the first mark got there first", async () => {
+    const { lot } = await openLot(5, 500, "ac".repeat(32));
+    await query(`UPDATE caos_lots SET status = 'mining' WHERE id = $1`, [lot.id]);
+
+    const assigned = await markAssigned(lot.id, "batch-arrived-late");
+    assert.notEqual(assigned, null);
+    assert.equal(assigned!.caos_request_id, "batch-arrived-late");
+    //Status only moves forward: a lot already delivering does not go back to `assigned`.
+    assert.equal(assigned!.status, "mining");
+
+    //And the id is claimed once — a redelivered 202 cannot repoint a lot at another batch.
+    assert.equal(await markAssigned(lot.id, "some-other-batch"), null);
   });
 
   //`mutación` is the one word the player-facing vocabulary does not allow to be approximate.

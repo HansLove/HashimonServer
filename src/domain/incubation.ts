@@ -323,11 +323,18 @@ export async function createLot(input: {
  */
 export async function markAssigned(lotId: string, caosRequestId: string): Promise<LotRow | null> {
   const res = await query<LotRow>(
+    //Gated on the batch id being unclaimed, NOT on the status: CaosEngine's first mark can
+    //land before this UPDATE runs, and that mark moves the lot to `mining`. Gating on
+    //`status = 'queued'` would then match nothing and leave caos_request_id null forever —
+    //which silently disables the only check that keeps one batch's marks off another's lot.
+    //Status still only moves forward, so a lot already mining stays mining.
     `UPDATE caos_lots
-        SET status = 'assigned', caos_request_id = $2, assigned_at = now()
-      WHERE id = $1 AND status = 'queued'
+        SET caos_request_id = $2,
+            status = CASE WHEN status = 'queued' THEN 'assigned' ELSE status END,
+            assigned_at = COALESCE(assigned_at, now())
+      WHERE id = $1 AND caos_request_id IS NULL AND status = ANY($3::text[])
       RETURNING *`,
-    [lotId, caosRequestId]
+    [lotId, caosRequestId, LIVE_STATUSES]
   );
   return res.rows[0] ?? null;
 }
