@@ -92,8 +92,24 @@ incubationWebhookRouter.post(
 
     //Discriminate on shape, not on a type field: CaosEngine forwards spoon's payload
     //verbatim and adds nothing that names which of the two it is.
-    const share = shareSchema.safeParse(body);
-    if (share.success) {
+    //
+    //`shareIndex` and `hash` are the discriminator, decided BEFORE either schema runs. A
+    //mark that fails validation must never be retried as a close: closeSchema asks only for
+    //requestId and a status string, so the day spoon adds a `status` field to its payload,
+    //one renamed key would turn every mark into a close — terminating the lot mid-batch,
+    //refunding the player, and making every mark after it a `lot_closed`.
+    if ("shareIndex" in body || "hash" in body) {
+      const share = shareSchema.safeParse(body);
+      if (!share.success) {
+        enrich({
+          error_code: "malformed_share",
+          //The failing field names, never the values: this body is a template, and one of
+          //its fields is the lot's own coinbase.
+          invalid_fields: share.error.issues.map((issue) => issue.path.join(".")).join(","),
+        });
+        res.status(400).json({ error: "unreadable mark", code: "malformed_share" });
+        return;
+      }
       const result = await applyShare(lot, share.data as CaosSharePayload);
       if (!result.ok) {
         //A rejected mark is a decision, not a delivery failure. Answering 200 stops
