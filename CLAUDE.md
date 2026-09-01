@@ -274,11 +274,16 @@ Per README/ADR: payments must go through a provider, never hand-rolled — this 
 real security/regulatory weight. Crypto goes through BTCPay via
 `@taloon/btcpay-middleware` (which owns the HMAC verification); fiat, if it ever
 happens, goes through a Stripe-class provider. Never verify a signature, compute a
-rate, or reconcile a payment by hand here. Payouts and refunds are untouched: an
-underpayment surfaces as `InvoiceExpired` with `partiallyPaid: true` (or `InvoiceInvalid`,
-depending on when the shortfall is noticed), so the charge lands in `expired` or `failed`
-and the player goes to support. The **only** signal support gets that coins actually arrived
-is `payment_partially_paid` / `payment_over_paid` on the wide event — nothing is stored on
+rate, or reconcile a payment by hand here. **A shortfall inside
+`BTCPAY_PAYMENT_TOLERANCE` (default 3%) is BTCPay's decision, not ours**: `createPayment`
+sends it as `checkout.paymentTolerance` and an invoice within it settles like any other, so
+`settleAndCredit` never learns a payment was short — the alternative, comparing paid against
+invoiced here, is exactly the hand-reconciliation this section forbids. Payouts and refunds
+are untouched: an underpayment *past* the tolerance surfaces as `InvoiceExpired` with
+`partiallyPaid: true` (or `InvoiceInvalid`, depending on when the shortfall is noticed), so
+the charge lands in `expired` or `failed` and the player goes to support. The **only**
+signal support gets that coins actually arrived is `payment_partially_paid` /
+`payment_over_paid` on the wide event — nothing is stored on
 the row. Owner passwords and encrypted keys are an intentional stopgap for the web↔Luanti
 bridge, not production-grade wallet custody as-is.
 

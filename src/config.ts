@@ -85,6 +85,14 @@ export const config = {
   btcpayApiKey: process.env.BTCPAY_API_KEY ?? "",
   btcpayStoreId: process.env.BTCPAY_STORE_ID ?? "",
   btcpayWebhookSecret: process.env.BTCPAY_WEBHOOK_SECRET ?? "",
+  // How much a payment may fall short and still settle, in percent. Real on-chain
+  // payments land a hair under the invoice all the time (a wallet's fee estimate, a
+  // rate that moved between quote and broadcast), and BTCPay's default 0 turns that
+  // into an expired invoice the player actually paid for. Applied by BTCPay itself,
+  // per invoice: within tolerance it sends InvoiceSettled and the credit path below
+  // is untouched — the shortfall is never reconciled by hand here.
+  // `||`, not `??`: a blank or non-numeric value must fall back, not become NaN.
+  btcpayPaymentTolerance: Number(process.env.BTCPAY_PAYMENT_TOLERANCE) || 3,
   // CaosEngine — assisted incubation. Empty base URL means the /incubation routes answer
   // 503 instead of charging credits for a lot nobody will ever mine.
   caosEngineUrl: process.env.CAOS_ENGINE_URL ?? "",

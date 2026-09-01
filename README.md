@@ -278,6 +278,15 @@ be the worse bug.
 price never revalues a charge already issued — the FK to `credits_plans` is referential
 integrity, nothing more. Plans are edited by SQL; there is no admin CRUD yet.
 
+**A payment that lands slightly short still settles.** Wallet fee estimates and a BTC rate
+that moved between quote and broadcast routinely leave a real payment a fraction of a percent
+under the invoice, and BTCPay's default tolerance of 0 expires those uncredited — money in,
+nothing granted. `createPayment` sends `checkout.paymentTolerance` on every invoice from
+`BTCPAY_PAYMENT_TOLERANCE` (default `3`, i.e. 3%). Within it BTCPay itself sends
+`InvoiceSettled` and the credit path is untouched; the server never compares paid against
+invoiced, which would be exactly the hand-reconciliation the ADR forbids. Raise it and the
+gap is a discount anyone can take on purpose — 3% is the ceiling, not a target.
+
 Webhook events map as: `InvoiceReceivedPayment`/`InvoiceProcessing` → `confirming`,
 `InvoiceSettled` → `settled` (+credits), `InvoiceExpired` → `expired`, `InvoiceInvalid` →
 `failed`. `InvoiceCreated` and `InvoicePaymentSettled` transition nothing.

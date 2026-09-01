@@ -6,6 +6,7 @@ import {
   type BTCPayPaymentMethod,
   type BTCPayWebhookPayload,
 } from "@taloon/btcpay-middleware";
+import { config } from "@/config";
 import { isUniqueViolation, query, withTransaction } from "@/db/pool";
 import { AppError } from "@/http/errors";
 import { enrich } from "@/http/wide-event";
@@ -90,6 +91,12 @@ export async function createPayment(playerId: string, sku: string): Promise<Paym
       orderId,
       description: `${plan.credits} Hashimon credits`,
       metadata: { playerId, sku: plan.sku, credits: plan.credits },
+      //A payment that lands a hair under the invoice is still the player paying: wallet
+      //fee estimates and a BTC rate that moved between quote and broadcast routinely cost
+      //a fraction of a percent. BTCPay applies the tolerance itself — inside it the
+      //invoice goes Settled like any other and settleAndCredit runs unchanged; outside it
+      //nothing changes either. No shortfall is ever measured or reconciled here.
+      checkout: { paymentTolerance: config.btcpayPaymentTolerance },
     });
   } catch (err: unknown) {
     //Safe to write off precisely because no invoice exists: nothing at BTCPay can ever
