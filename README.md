@@ -26,7 +26,7 @@ src/
     species.ts   server-side species registry (identity + base stats; keys gate emission)
   db/
     schema.sql   players, sessions, hashimons (emission ledger), credits_plans,
-                 payments, audit_log
+                 payments, caos_pricing, caos_lots, audit_log
     pool.ts      pg pool + withTransaction
     migrate.ts   applies schema.sql (idempotent)
   domain/
@@ -34,11 +34,14 @@ src/
     hashimons.ts    emission (server-owned birth), inventory, present() (derived view)
     credit-plans.ts the credit catalogue — the price lives here, never in a request
     payments.ts     charges, webhook transitions, once-only credit settlement
+    incubation.ts   the credit sink — lot ledger, mark verification, proportional refunds
+    caos-client.ts  the single outbound POST that asks CaosEngine for a batch
     audit.ts        append-only audit log
   http/
     app.ts       express wiring          auth.ts    bearer-session gate
     errors.ts    AppError + JSON errors   routes/    session, profile, hashimons, health,
-                                                     payments, payments-webhook
+                                                     payments, payments-webhook,
+                                                     incubation, incubation-webhook
   server.ts      entry point
 ```
 
@@ -111,6 +114,10 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | GET | `/payments/btcpay-server/invoice/:orderId` | ✓ | one charge — what the client polls |
 | POST | `/payments/btcpay-server/invoice/:orderId/cancel` | ✓ | give up on a `waiting` charge — **409 `payment_in_flight`** once coins are on the wire |
 | POST | `/payments/btcpay-server/webhook` | HMAC | BTCPay callback — **401** on a bad signature |
+| GET | `/incubation/pricing` | – | the mark ladder (`creditsPerShare` already net of the tier discount) |
+| POST | `/hashimons/:id/incubation` | ✓ | open a lot of `shares` marks — **409 `incubation_pending`** if one is already live |
+| GET | `/hashimons/:id/incubation` | ✓ | the live lot, or the one that just closed; **204** when there is neither |
+| POST | `/incubation/webhook/:lotSecret` | lot secret | CaosEngine callback — one mark, or the batch's close |
 | GET | `/internal/luanti-auth` | secret | account list `{name, password, can_own}` for Luanti poll |
 | POST | `/internal/luanti-register` | secret | `{name, password}` → 201 guest row (in-game signup) |
 | POST | `/internal/luanti-bind` | secret | `{name}` → bearer session (owners only) |
@@ -271,6 +278,15 @@ be the worse bug.
 price never revalues a charge already issued — the FK to `credits_plans` is referential
 integrity, nothing more. Plans are edited by SQL; there is no admin CRUD yet.
 
+**A payment that lands slightly short still settles.** Wallet fee estimates and a BTC rate
+that moved between quote and broadcast routinely leave a real payment a fraction of a percent
+under the invoice, and BTCPay's default tolerance of 0 expires those uncredited — money in,
+nothing granted. `createPayment` sends `checkout.paymentTolerance` on every invoice from
+`BTCPAY_PAYMENT_TOLERANCE` (default `3`, i.e. 3%). Within it BTCPay itself sends
+`InvoiceSettled` and the credit path is untouched; the server never compares paid against
+invoiced, which would be exactly the hand-reconciliation the ADR forbids. Raise it and the
+gap is a discount anyone can take on purpose — 3% is the ceiling, not a target.
+
 Webhook events map as: `InvoiceReceivedPayment`/`InvoiceProcessing` → `confirming`,
 `InvoiceSettled` → `settled` (+credits), `InvoiceExpired` → `expired`, `InvoiceInvalid` →
 `failed`. `InvoiceCreated` and `InvoicePaymentSettled` transition nothing.
@@ -325,6 +341,159 @@ Recorded rather than fixed — each needs a decision, not just code:
   storage and they are gone. Deliberate (the checkout is only reachable from the portal, which
   requires `/register` or `/login`), but it is the one value-bearing route with no `canOwn`.
 
+### Assisted incubation (CaosEngine)
+
+The sink for those credits, and the second and last path by which `players.credits` moves.
+A player buys **marks of high entropy** — proof of work mined for their creature by
+CaosEngine's pool — instead of grinding for them in the browser. A browser reaches ~5 stars
+normally and 8 at the ceiling; a bought mark starts at 12.
+
+**Player-facing vocabulary is fixed and narrow**: *encubar*, *incubadora*, *marca*,
+*estrellas*, and the outcome is a *mutación*. Never mining, miner, hardware, hashrate,
+share, bits or PoW in anything a player reads. `share` remains the technical term in code
+and in this file.
+
+The request carries a **count, never an amount**. `caos_pricing` is the ladder, and
+`GET /incubation/pricing` publishes it **already multiplied out** — the 10-24 tier arrives
+as `creditsPerShare: 9.8, discountPct: 2`, so a client cannot apply the discount a second
+time. `discountPct` is a label. Totals: 1 → 10, 10 → 98, 25 → 241, 50 → 475 credits.
+
+```json
+// POST /hashimons/:id/incubation  {"shares": 10}   → 201
+{ "lot": {
+    "id": "1dd93f68…", "status": "assigned",
+    "sharesRequested": 10, "sharesDelivered": 0,
+    "creditsCharged": 98, "creditsRefunded": 0,
+    "starsBefore": 5, "bestStars": 0, "bestShareIndex": null, "mutated": false,
+    "createdAt": "…", "assignedAt": "…", "closedAt": null } }
+```
+
+Seven statuses, all decided here: `queued → assigned → mining → complete | partial |
+failed | expired`. As with payments, the client runs no state machine — the phase of its UI
+*is* `status`. A closed lot keeps answering `GET` for 24 hours, because a player who shut
+the tab has to find the outcome when they come back.
+
+**Nothing the pool reports is believed.** Every mark is re-hashed from the template
+delivered with it (`hashBitcoinJob`), and counted only if three independent checks hold: the
+rebuilt header hashes to the hash claimed, the coinbase — which the merkle root commits to —
+carries this creature's DNA, **and** the recomputed hash clears the star floor the lot
+bought. The second stops a pool billing one player for another's work, or replaying one mark
+across every creature it ever mined for. The third is what makes a mark worth paying for at
+all: the first two prove a mark is *ours*, not that it cost anything, and a header with
+`nonce: 0` carrying the right DNA passes both. Without the floor a pool could deliver fifty
+of those, close the lot `complete`, owe no refund, and leave the creature untouched. The
+floor is measured on the recomputed hash — `stars` and `leadingZeros` ride in the payload and
+are worth exactly as much as any other number a pool reports.
+
+`caos_lots.stars_requested` carries that floor per lot, snapshotted at creation for the same
+reason `payments` snapshots its price: changing the product's floor must never revalue a lot
+already open. The delivered mark is stored in `hashimons.best_share_bitcoin`, so `present()`
+re-verifies it on every read exactly like a browser-mined one; `verified` is `true` or the
+mark is not there.
+
+**`mutated` is recorded by the mark that caused it**, never derived on read. It means the
+creature's *star* count rose — four bits buy one star, so most new records are invisible on
+the creature sheet, and `mutación` is the one word the vocabulary rules do not allow to be
+approximate. Deriving it from `stars_before` would have been wrong: that number is frozen
+when the lot opens, and a player who keeps incubating in the browser meanwhile leaves it
+behind, so a mark the creature had already beaten would still compare favourably against it.
+
+**The delivery count decides how a lot closes.** CaosEngine's own label can agree with the
+ledger or lower it, never raise it: a batch it calls `completed` whose marks did not all
+reach us — three exhausted webhook retries is enough — closes `partial` here, because the
+refund is computed from that same count and a lot cannot be complete and owe money back at
+once.
+
+Three guarantees are SQL, not `if`s (`src/db/schema.sql`):
+
+- **one live lot per player** — `caos_lots_active_per_player_idx` over
+  `status IN ('queued','assigned','mining')`. This is stricter than the product's
+  one-per-creature rule and therefore subsumes it. A second concurrent POST gets `23505` →
+  409 `incubation_pending` **with the live lot in the body**.
+- **a mark counted once** — `submitted_shares.hash` is the primary key (global dedupe) and
+  `submitted_shares_lot_index_idx` closes the other door, so the same position in the same
+  lot cannot be counted twice even under two different hashes. CaosEngine redelivers; a
+  repeat is the normal case.
+- **a refund paid once** — `UPDATE … WHERE status = ANY(live) RETURNING *`. The redelivered
+  close event lands on zero rows. `applyShare`'s own lot UPDATE carries the same guard, and
+  it is not decoration: a mark that arrives after a stale sweep or a close settled the lot
+  would otherwise put it back into `mining`, and a resurrected lot passes the refund's live
+  check a second time. That mark is rolled back whole — a delivery after the lot is settled
+  leaves no trace of having been counted.
+- **a record that only moves up** — the creature's `best_share_*` columns are decided in the
+  UPDATE itself (`CASE WHEN $2 > best_share_bits`), against the column and never against a
+  value read before the transaction opened. A player browser-incubating while their lot runs
+  is two writers on one creature, and the loser of that race must not be able to overwrite a
+  better mark with a worse one. The row is also taken `FOR UPDATE` first, so the star count
+  before and after come from one view of it.
+
+**Refunds are proportional to what was actually paid**: undelivered marks come back at the
+lot's own price, discount included (3 of 10 on a 98-credit lot returns 69). CaosEngine does
+not refund us; Hashimon eats the cost of the marks already mined. A lot that never reached
+the pool is written off in full, and so is one whose miner hangs.
+
+**The one-hour timeout starts at assignment, not at payment** (`assigned_at`, not
+`created_at`). A lot waiting in CaosEngine's queue for lack of energy supply must never
+refund itself just for waiting. The longest lot takes ~6 minutes, so an hour is 10x the worst
+case — past it the miner is genuinely hung. Note the approximation: CaosEngine exposes no
+"a miner picked this up" event, so the clock starts when it answers 202.
+
+`origin` and `caos_lot_id` on `submitted_shares` record where every mark came from. That is
+never shown — stars are mined, not bought, and a bought mark is as real as a browser one —
+but it is the field a pay-to-win argument, a separate ranking or an audit would need, and it
+cannot be reconstructed later.
+
+### Quick manual check (assisted incubation)
+
+`GET /incubation/pricing` is public and needs nothing running but the server. Exercising the
+webhook without CaosEngine takes a seeded lot plus the golden vector from
+`src/core/core.test.ts` — the same external vector that pins the header byte order:
+
+```bash
+curl -s localhost:4000/incubation/pricing | jq
+# creditsPerShare must be 9.8 for the 10-24 tier, not 10 — it is published net.
+
+# Seed a player, a creature whose DNA the vector's coinbase commits to, and an assigned lot
+# (see the fixtures in src/domain/incubation.test.ts), then deliver one mark:
+curl -s -X POST localhost:4000/incubation/webhook/<lot_secret> \
+  -H 'content-type: application/json' --data-binary @share.json
+# {"received":true,"accepted":true,"duplicate":false} — send it twice: the second is duplicate:true.
+
+curl -s localhost:4000/hashimons/<id> -H "authorization: Bearer <token>" | jq '.verified'
+# true — present() recomputed the pool's share and agreed.
+```
+
+A close event is the other shape on the same URL:
+`{"requestId":"…","status":"partial","sharesDelivered":1,"terminationReason":"…"}`. Send it
+twice; the refund moves once. Delivery is counted from the ledger, never from the number the
+pool reports — the refund is money, and only verified marks are an honest basis for it.
+
+An unset `CAOS_ENGINE_URL`, `HASHIMON_PUBLIC_URL` or `HASHIMON_COINBASE_ADDRESS` makes
+`POST /hashimons/:id/incubation` answer 503 `incubation_unavailable` rather than charge for a
+lot with nowhere to send the work.
+
+### Known gaps in the incubation flow
+
+- **CaosEngine does not sign its deliveries.** The lot's 32-byte secret in the URL is the
+  entire credential. It is weaker than the BTCPay webhook and accepted knowingly: a forged
+  *mark* has to solve the proof of work to be counted, which is the thing being sold. A
+  forged *close* is the real exposure, and its worst outcome is refunding the player early —
+  never charging them. Ask CaosEngine for an HMAC before this carries more value.
+- **`assigned` is inferred from the 202**, not from a real assignment event, so a batch
+  queued on CaosEngine's side burns the player's hour. Harmless at today's depth; the fix is
+  the event, not a longer timeout.
+- **The stale sweep runs on read paths, not on a schedule.** A lot belonging to a player who
+  never comes back stays live until someone reads it. It blocks only that player.
+- **That sweep is an unindexed scan on a polling endpoint.** `expireStaleLots` runs on every
+  `GET /hashimons/:id/incubation`, and its `OR` of two predicates over `created_at` and
+  `assigned_at` is not supported by an index of its own — so as terminal lots accumulate,
+  each poll pays to sweep every other player's rot. `caos_lots_active_per_player_idx` covers
+  the live rows, which are the tiny minority, but the `OR` will still seq-scan. Fine at the
+  current ledger size; the fix is a partial index over the live statuses, or scoping the
+  sweep to the player being read the way `expireStaleCharges` does.
+- **No reconciliation against CaosEngine.** If every delivery of a batch is lost, the lot
+  expires and refunds in full — the player is made whole, but the marks are paid for and gone.
+
 ## Logging — one wide event per request
 
 The server does not scatter log lines through a handler. Every HTTP request produces
@@ -370,13 +539,35 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
 - **Not verified:** anything against the real BTCPay instance. No invoice has been created
   or paid end to end — `POST /invoice` has only been exercised against an unreachable
   gateway (correctly → 502 `gateway_error`).
+- Incubation unit + ledger tests (`src/domain/incubation.test.ts`, live Postgres): the four
+  ladder totals, proportional refunds with the discount carried through, the golden vector
+  accepted and a forged hash / swapped merkle branch / wrong creature all rejected, the
+  per-player index rejecting a second lot (charging nothing), redelivery not double-counting,
+  a partial close refunding exactly once, a queued lot swept and refunded in full, and an
+  `assigned` lot surviving five minutes but not three hours. Plus: a genuine, correctly
+  committed mark that did no work refused as `below_floor` while the lot stays open; the
+  pool's claimed `stars` ignored in favour of the recomputed hash; a mark arriving after the
+  lot settled refused and rolled back whole, with the refund not paid twice; a weaker mark
+  failing to displace the creature's record; no `mutación` claimed for a mark the creature
+  had already beaten, and one reported when a mark really crosses a star; and a batch id
+  still claimed when the first mark beat the 202 to the row.
+- Incubation smoke (running server, local Postgres, no CaosEngine): `/incubation/pricing`
+  publishes the ladder net of discounts; the golden vector delivered to
+  `/incubation/webhook/:lotSecret` → `accepted`, repeated → `duplicate`, and
+  `GET /hashimons/:id` then returns `verified: true` — `present()` recomputed a pool-mined
+  share and agreed. Partial close → `partial` + 10 of 20 credits back, repeated → no second
+  payout. `POST` with CaosEngine unreachable → 502 `caos_unavailable` and the full charge
+  returned. The lot secret appears in no log line.
+- **Not verified:** anything against a real CaosEngine or spoon. No batch has been requested
+  or mined end to end.
 
 ## Next phases (not built yet)
 
 3. **Incubation / Caos Engine** — server-owned seed so births can't be grinded.
-4. **Credits / payments** — buying credits with Bitcoin is built (see above); what the
-   credits *buy* is not. There is no sink yet, and no admin surface for the catalogue.
-   Fiat, if it ever happens, goes through a provider (Stripe-class), never hand-rolled.
+4. **Credits / payments** — buying credits with Bitcoin is built, and so is the first sink:
+   assisted incubation (see above). Still missing is any admin surface for either catalogue —
+   `credits_plans` and `caos_pricing` are edited by SQL. Fiat, if it ever happens, goes
+   through a provider (Stripe-class), never hand-rolled.
 5. **MCP layer** — the player's own AI reads and *suggests*; it never writes
    authoritative state.
 

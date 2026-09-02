@@ -23,6 +23,7 @@ export interface BitcoinJobInput {
   prevhashBE: string;
   versionHex: string;
   bits: string;
+  /** Stratum `merkle_branch`: internal (raw digest) byte order, NOT display order. */
   merkleBranch: string[];
   extranonce1: string;
   extranonce2Size: number;
@@ -66,7 +67,32 @@ export interface VerifyJobShareResult {
 /** Template fields needed to recompute a stored bitcoin-mode best share; captured at
  *  submit time because the source template is not guaranteed to survive (mining_jobs
  *  rows expire and the in-memory template cache rotates every templateRefreshMs). */
-export type BitcoinShareSnapshot = Omit<BitcoinJobInput, "extranonce1" | "extranonce2" | "nonceHex">;
+export type BitcoinShareSnapshot = Omit<BitcoinJobInput, "extranonce1" | "extranonce2" | "nonceHex"> & {
+  /** Only for shares mined by an outside pool (CaosEngine/spoon): their extranonces belong to
+   *  that pool's session, so they cannot be re-derived from the creature's DNA the way a
+   *  browser share's can. Absent on browser shares — `deriveExtranonce1(dna)` and
+   *  `PowRecord.bestShareExtranonce2` still answer for those. */
+  extranonce1?: string | null;
+  extranonce2?: string | null;
+};
+
+/** Stratum ships prevhash word-swabbed (4-byte words reversed in place). Undoing the swab is
+ *  reversing the order of those 8 words — the bytes inside each word stay put — which yields
+ *  the display (BE) hash `BitcoinJobInput.prevhashBE` expects.
+ *
+ *  Throws on anything that is not a whole number of 4-byte words. Silently dropping a
+ *  trailing partial word would return a well-formed hash that is simply the wrong one, and
+ *  the caller would report the mark as a hash mismatch — an accusation of dishonesty for
+ *  what is really a change in the pool's wire format. */
+export function stratumPrevHashToBE(prevHashStratum: string): string {
+  const words = prevHashStratum.match(/.{8}/g);
+  if (!words || words.join("").length !== prevHashStratum.length) {
+    throw new Error(
+      `stratumPrevHashToBE: prevhash length ${prevHashStratum.length} is not a whole number of 4-byte words`
+    );
+  }
+  return words.reverse().join("");
+}
 
 export interface PowRecord {
   bestShareBits: number;
@@ -197,12 +223,14 @@ export function hashBitcoinJob(input: BitcoinJobInput): { hashBE: string; hashLE
   const coinbaseHex = input.coinbasePrefix + input.extranonce1 + en2Padded + input.coinbaseSuffix;
   let root = doubleSha256Buffer(Buffer.from(coinbaseHex, "hex"));
 
-  for (const branchHexBE of input.merkleBranch) {
-    const branchLE = Buffer.from(branchHexBE, "hex").reverse();
-    root = doubleSha256Buffer(Buffer.concat([root, branchLE]));
+  //Stratum convention: merkle_branch entries and the header's merkle root are both in
+  //internal (raw digest) byte order, so the fold flips nothing — not the siblings, not the
+  //root. Reversing either produces a header that hashes to something no pool ever accepts.
+  for (const branchHex of input.merkleBranch) {
+    root = doubleSha256Buffer(Buffer.concat([root, Buffer.from(branchHex, "hex")]));
   }
 
-  const merkleRootLE = reverseHex(root.toString("hex"));
+  const merkleRootLE = root.toString("hex");
   let versionLE = reverseHex(input.versionHex.padStart(8, "0"));
 
   if (input.versionBits && input.versionBits.toLowerCase() !== input.versionHex.toLowerCase()) {
@@ -244,16 +272,23 @@ export function verifyStoredPow(dna: string, pow: PowRecord): StoredShareVerdict
 
   let recomputed: string;
   if (pow.bestShareBitcoin) {
-    // bestShareExtranonce2 must be stored alongside bestShareBitcoin (submitShare
-    // always writes both together) — treat a missing one as corrupted data rather
-    // than silently recomputing against a fabricated extranonce2 of 0.
-    if (pow.bestShareExtranonce2 == null) {
+    const snapshot = pow.bestShareBitcoin;
+    // An outside pool's share carries its own extranonces; a browser share re-derives them
+    // from the DNA plus bestShareExtranonce2, which submitShare always writes alongside the
+    // snapshot — treat a missing one as corrupted data rather than silently recomputing
+    // against a fabricated extranonce2 of 0.
+    const extranonce2 =
+      snapshot.extranonce2 ??
+      (pow.bestShareExtranonce2 == null
+        ? null
+        : pow.bestShareExtranonce2.toString(16).padStart(snapshot.extranonce2Size * 2, "0"));
+    if (extranonce2 == null) {
       return { status: "mismatch", claimedHash: pow.bestShareHash, recomputedHash: "" };
     }
     recomputed = hashBitcoinJob({
-      ...pow.bestShareBitcoin,
-      extranonce1: deriveExtranonce1(dna),
-      extranonce2: pow.bestShareExtranonce2.toString(16).padStart(pow.bestShareBitcoin.extranonce2Size * 2, "0"),
+      ...snapshot,
+      extranonce1: snapshot.extranonce1 ?? deriveExtranonce1(dna),
+      extranonce2,
       nonceHex: pow.bestShareNonce.toString(16).padStart(8, "0"),
     }).hashBE;
   } else if (pow.bestShareExtranonce2 != null) {
