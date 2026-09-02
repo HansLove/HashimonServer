@@ -70,10 +70,36 @@ CREATE TABLE IF NOT EXISTS town_claims (
   member_count integer NOT NULL DEFAULT 0,
   mayor        text,
   home_x       integer,
+  home_y       integer,
   home_z       integer,
-  blocks       jsonb   NOT NULL DEFAULT '[]'::jsonb,
+  blocks       jsonb   NOT NULL DEFAULT '[]'::jsonb,  -- [[x,y,z], ...] mapblock coords (3D)
+  members      jsonb   NOT NULL DEFAULT '[]'::jsonb,  -- [{name, rank}] rank: mayor|comayor|resident
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
+-- Columns added after town_claims first shipped — add idempotently for existing DBs.
+-- home_y: the world is 3D (a sky-island and a ground town can share (x,z)).
+-- members: the town roster + ranks, so the website can show and manage politics.
+ALTER TABLE town_claims ADD COLUMN IF NOT EXISTS home_y integer;
+ALTER TABLE town_claims ADD COLUMN IF NOT EXISTS members jsonb NOT NULL DEFAULT '[]'::jsonb;
+
+-- Political actions requested from the WEBSITE (e.g. the mayor promoting a member to
+-- co-mayor) that the Luanti world must carry out. The web enqueues a 'pending' row
+-- after checking the requester is the town's mayor; the world polls, RE-VALIDATES
+-- against live Towny (the source of truth), applies the rank flag, and acks. A queue,
+-- not authority — Towny decides what actually holds.
+CREATE TABLE IF NOT EXISTS town_actions (
+  id          bigserial PRIMARY KEY,
+  town_name   text NOT NULL,
+  actor       text NOT NULL,        -- luanti username who requested (must be mayor)
+  target      text NOT NULL,        -- member being re-ranked
+  op          text NOT NULL,        -- 'add' | 'remove'
+  rank        text NOT NULL,        -- 'comayor'
+  status      text NOT NULL DEFAULT 'pending',  -- pending | applied | rejected
+  detail      text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  applied_at  timestamptz
+);
+CREATE INDEX IF NOT EXISTS town_actions_pending_idx ON town_actions(status) WHERE status = 'pending';
 
 -- Bearer session tokens. Thin on purpose; swap for a real auth provider before
 -- production (see README — do not grow this into a home-made auth system).
@@ -306,3 +332,49 @@ CREATE TABLE IF NOT EXISTS magi_custody_log (
 );
 CREATE INDEX IF NOT EXISTS magi_custody_log_serial_idx ON magi_custody_log(serial);
 CREATE INDEX IF NOT EXISTS magi_custody_log_verdict_idx ON magi_custody_log(verdict) WHERE verdict <> 'ok';
+
+-- ---------------------------------------------------------------------------
+-- Compañero: estado, memoria y turnos de conversación (ver docs/COMPANION_V1.md)
+-- ---------------------------------------------------------------------------
+
+-- El bienestar NO se guarda como número. Se guardan las FECHAS de los cuatro
+-- cuidados, y el valor se calcula al leer. Así el estado envejece solo, sin cron
+-- ni trabajo en segundo plano: una criatura desatendida seis meses tiene hambre
+-- la primera vez que alguien la mira, no porque un job lo escribiera.
+CREATE TABLE IF NOT EXISTS companion_state (
+  hashimon_id  uuid PRIMARY KEY REFERENCES hashimons(id) ON DELETE CASCADE,
+  fed_at       timestamptz NOT NULL DEFAULT now(),
+  talked_at    timestamptz NOT NULL DEFAULT now(),
+  mined_at     timestamptz NOT NULL DEFAULT now(),
+  world_at     timestamptz NOT NULL DEFAULT now(),
+  -- Último sector visitado. Cambiarlo es lo que satisface la carencia "mundo".
+  last_sector  text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+-- Lo poco que la criatura conserva. Una línea por recuerdo, en su voz.
+-- Sin embeddings y sin búsqueda: caben todos en el prompt.
+CREATE TABLE IF NOT EXISTS companion_memory (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  hashimon_id uuid NOT NULL REFERENCES hashimons(id) ON DELETE CASCADE,
+  text        text NOT NULL CONSTRAINT companion_memory_text_len CHECK (char_length(text) BETWEEN 1 AND 240),
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS companion_memory_recent_idx
+  ON companion_memory (hashimon_id, created_at DESC);
+
+-- Los turnos. Existen para dos cosas: contar el cupo gratis y dar continuidad
+-- corta a la conversación. No son la memoria — la memoria es companion_memory.
+CREATE TABLE IF NOT EXISTS chat_turns (
+  id            bigserial PRIMARY KEY,
+  hashimon_id   uuid NOT NULL REFERENCES hashimons(id) ON DELETE CASCADE,
+  role          text NOT NULL CONSTRAINT chat_turns_role CHECK (role IN ('user','assistant')),
+  content       text NOT NULL,
+  input_tokens  integer NOT NULL DEFAULT 0,
+  output_tokens integer NOT NULL DEFAULT 0,
+  credits_spent bigint  NOT NULL DEFAULT 0,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS chat_turns_recent_idx
+  ON chat_turns (hashimon_id, created_at DESC);

@@ -7,6 +7,7 @@ import { sessionRouter } from "@/http/routes/session";
 import { profileRouter } from "@/http/routes/profile";
 import { territoryRouter } from "@/http/routes/territory";
 import { hashimonsRouter } from "@/http/routes/hashimons";
+import { chatRouter } from "@/http/routes/chat";
 import { authRouter } from "@/http/routes/auth";
 import { internalRouter } from "@/http/routes/internal";
 import { walletRouter } from "@/http/routes/wallet";
@@ -45,6 +46,7 @@ export function createApp(logger?: Logger) {
   app.use(profileRouter);
   app.use(territoryRouter);
   app.use(hashimonsRouter);
+  app.use(chatRouter);
   app.use(walletRouter);
   app.use(magiRouter);
   app.use(paymentsRouter);

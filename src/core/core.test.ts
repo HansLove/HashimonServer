@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { TEMPERAMENTS } from "@/domain/companion";
 //Core verification — byte-identical with the browser client.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -22,6 +24,8 @@ import {
 import {
   lifeNumberOf,
   spiritOf,
+  BIRTH_IDENTITY_FINGERPRINT,
+  BIRTH_GOLDEN_VECTORS,
   birthIdentityOf,
   isPlausibleDob,
   genesisSpeciesKey,
@@ -254,6 +258,73 @@ test("the twelve spirit lines cover the family space without overlap", () => {
   //Un espíritu sin cuerpos instalables debe declarar pariente, o un mundo sin
   //los packs opcionales dejaría esa fecha sin criatura.
   for (const s of SPIRITS) { assert.ok(s.line.length > 0); }
+});
+
+test("the birth compiler is frozen: fingerprint over all 17,897 dates", () => {
+  //El sello de la Capa A. Cubre las 17,897 fechas de 1970-2018 con su identidad
+  //completa, así que cualquier cambio en la tabla de elementos, las ventanas
+  //solares o la regla del número de vida mueve la huella y rompe aquí.
+  //
+  //Si este test falla, la pregunta NO es "cómo actualizo la huella": es si el
+  //cambio justifica renacer a todo el padrón. speciesKey está en el preimagen
+  //del ADN.
+  const h = createHash("sha256");
+  for (let y = 1970; y <= 2018; y++) {
+    for (let m = 1; m <= 12; m++) {
+      const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      for (let d = 1; d <= dim; d++) {
+        const dob = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+        const b = birthIdentityOf(dob);
+        h.update(`${dob}|${b.lifeNumber}|${b.element}|${b.spirit}|${b.speciesKey}\n`);
+      }
+    }
+  }
+  assert.equal(h.digest("hex"), BIRTH_IDENTITY_FINGERPRINT);
+});
+
+test("golden vectors resolve by hand", () => {
+  for (const [dob, lifeNumber, element, spirit] of BIRTH_GOLDEN_VECTORS) {
+    const b = birthIdentityOf(dob);
+    assert.equal(b.lifeNumber, lifeNumber, `${dob} número de vida`);
+    assert.equal(b.element, element, `${dob} elemento`);
+    assert.equal(b.spirit, spirit, `${dob} espíritu`);
+  }
+});
+
+test("every kin points at a spirit that exists", () => {
+  //Un kin colgante no falla al compilar en Lua y sólo se nota en un mundo sin
+  //los packs opcionales: la criatura se queda sin cuerpo al que caer. Pasó con
+  //`wyrm`, un nombre animal anterior al renombrado arquetípico.
+  const keys = new Set(SPIRITS.map((s) => s.key));
+  for (const s of SPIRITS) {
+    if (s.kin) assert.ok(keys.has(s.kin), `${s.key} apunta a un kin inexistente: ${s.kin}`);
+  }
+});
+
+test("the solar windows cover the year with no gaps or overlaps", () => {
+  //365 días, 12 signos, sin huecos. Bloom envuelve el cambio de año (12/21 ->
+  //1/20), que es el caso que un rango ingenuo rompe.
+  const seen = new Set<string>();
+  let days = 0;
+  for (let m = 1; m <= 12; m++) {
+    const dim = new Date(Date.UTC(2001, m, 0)).getUTCDate();
+    for (let d = 1; d <= dim; d++) {
+      seen.add(spiritOf(`2001-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`));
+      days++;
+    }
+  }
+  assert.equal(days, 365);
+  assert.equal(seen.size, 12, "algún signo no recibe ningún día");
+});
+
+test("the server and the browser agree on the temperament list", () => {
+  //El nibble [47] indexa por POSICIÓN: si las dos listas se desordenan, cada
+  //criatura viva cambia de carácter. El navegador tiene la suya en
+  //ihashima-website/src/lib/compiler.ts y este es el único sitio que las ata.
+  assert.deepEqual(
+    [...TEMPERAMENTS],
+    ["docile", "curious", "playful", "aggressive", "cautious", "aloof", "energetic", "serene"]
+  );
 });
 
 test("dob validation rejects impossible and future dates", () => {

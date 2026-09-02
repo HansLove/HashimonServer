@@ -79,6 +79,23 @@ console.log(`spirits        ${SPIRITS.map((s) => `${s.name} ${pct(sp[s.key])}`).
 
 const families = SPIRITS.flatMap((s) => s.line);
 const dupes = families.filter((f, i) => families.indexOf(f) !== i);
+// Un `kin` debe apuntar a un signo que exista, y las líneas de linaje deben
+// coincidir con las del motor. Ninguna de las dos cosas se comprobaba, y por eso
+// pasaron dos derivas: cuatro linajes quedaron desincronizados tras la poda, y
+// `kin = "wyrm"` —un nombre animal anterior al renombrado arquetípico—
+// sobrevivió apuntando a un signo que ya no existe. El fallback de un mundo sin
+// el pack propio habría buscado la nada.
+{
+  const keys = new Set(SPIRITS.map((s) => s.key));
+  const dangling = SPIRITS.filter((s) => s.kin && !keys.has(s.kin));
+  if (dangling.length > 0) {
+    console.error(`kin            ROTO — ${dangling.map((s) => `${s.key}->${s.kin}`).join(", ")}`);
+    process.exitCode = 1;
+  } else {
+    console.log("kin            OK — todos apuntan a un signo existente");
+  }
+}
+
 console.log(`families       ${families.length} across 12 lines${dupes.length ? ` — DUPLICATED: ${dupes}` : ", no duplicates"}`);
 
 process.exit(fail === 0 && orphan === 0 && dupes.length === 0 ? 0 : 1);

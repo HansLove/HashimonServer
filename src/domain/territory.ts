@@ -66,15 +66,25 @@ export async function listTownRanking(limit = 100): Promise<TownRankRow[]> {
   return res.rows;
 }
 
+/** A town member's political position. Mirrors Towny's real flags. */
+export type TownRank = "mayor" | "comayor" | "resident";
+export interface TownMember {
+  name: string;
+  rank: TownRank;
+}
+
 /** One town's claimed footprint for the cadastral map. `blocks` is the deduped list of
- *  [x,z] mapblock coordinates (top-down projection); `home` is the homeblock, if any. */
+ *  [x,y,z] mapblock coordinates (the world is 3D — a sky island and the ground below it
+ *  are distinct); `home` is the homeblock, if any; `members` is the roster + ranks. */
 export interface TownClaimsRow {
   town_name: string;
   block_count: number;
   mayor: string | null;
   home_x: number | null;
+  home_y: number | null;
   home_z: number | null;
-  blocks: [number, number][];
+  blocks: [number, number, number][];
+  members: TownMember[];
 }
 
 /** One town in the whole-world snapshot pushed by the Luanti sync mod. */
@@ -84,8 +94,10 @@ export interface TownClaimInput {
   memberCount: number;
   mayor: string | null;
   homeX: number | null;
+  homeY: number | null;
   homeZ: number | null;
-  blocks: [number, number][];
+  blocks: [number, number, number][];
+  members: TownMember[];
 }
 
 /** Replace the entire town snapshot in one transaction: upsert every town in the push
@@ -102,17 +114,20 @@ export async function replaceTownClaims(towns: TownClaimInput[]): Promise<number
     for (const t of towns) {
       await query(
         `INSERT INTO town_claims
-           (town_name, block_count, member_count, mayor, home_x, home_z, blocks, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())
+           (town_name, block_count, member_count, mayor, home_x, home_y, home_z, blocks, members, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, now())
          ON CONFLICT (town_name) DO UPDATE SET
            block_count  = EXCLUDED.block_count,
            member_count = EXCLUDED.member_count,
            mayor        = EXCLUDED.mayor,
            home_x       = EXCLUDED.home_x,
+           home_y       = EXCLUDED.home_y,
            home_z       = EXCLUDED.home_z,
            blocks       = EXCLUDED.blocks,
+           members      = EXCLUDED.members,
            updated_at   = now()`,
-        [t.name, t.blockCount, t.memberCount, t.mayor, t.homeX, t.homeZ, JSON.stringify(t.blocks)],
+        [t.name, t.blockCount, t.memberCount, t.mayor, t.homeX, t.homeY, t.homeZ,
+         JSON.stringify(t.blocks), JSON.stringify(t.members)],
         client
       );
     }
@@ -123,7 +138,7 @@ export async function replaceTownClaims(towns: TownClaimInput[]): Promise<number
 /** Every town's claimed footprint, for the public cadastral map. */
 export async function listTownClaims(): Promise<TownClaimsRow[]> {
   const res = await query<TownClaimsRow>(
-    `SELECT town_name, block_count, mayor, home_x, home_z, blocks
+    `SELECT town_name, block_count, mayor, home_x, home_y, home_z, blocks, members
        FROM town_claims
       ORDER BY block_count DESC, town_name ASC`
   );
@@ -135,8 +150,12 @@ export function presentTownClaims(rows: TownClaimsRow[]) {
     townName: r.town_name,
     blockCount: r.block_count,
     mayor: r.mayor,
-    home: r.home_x !== null && r.home_z !== null ? ([r.home_x, r.home_z] as [number, number]) : null,
+    home:
+      r.home_x !== null && r.home_y !== null && r.home_z !== null
+        ? ([r.home_x, r.home_y, r.home_z] as [number, number, number])
+        : null,
     blocks: r.blocks,
+    members: r.members,
   }));
 }
 
@@ -170,4 +189,68 @@ export function presentTerritory(row: PlayerTerritoryRow | null) {
     isMayor: row.is_mayor,
     updatedAt: row.updated_at,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Town politics — the website manages co-mayors; the Luanti world carries it out.
+// ---------------------------------------------------------------------------
+
+/** The roster + ranks of one town (from the projection the world pushes). */
+export async function getTownMembers(townName: string): Promise<TownMember[]> {
+  const res = await query<{ members: TownMember[] }>(
+    `SELECT members FROM town_claims WHERE town_name = $1`,
+    [townName]
+  );
+  return res.rows[0]?.members ?? [];
+}
+
+export interface TownActionRow {
+  id: number;
+  town_name: string;
+  actor: string;
+  target: string;
+  op: "add" | "remove";
+  rank: string;
+}
+
+/** Queue a rank change requested from the web. The route has already checked the actor
+ *  is the town's mayor; the world re-validates before applying, so this is a request,
+ *  not authority. */
+export async function enqueueRankAction(input: {
+  townName: string;
+  actor: string;
+  target: string;
+  op: "add" | "remove";
+  rank: string;
+}): Promise<void> {
+  await query(
+    `INSERT INTO town_actions (town_name, actor, target, op, rank) VALUES ($1, $2, $3, $4, $5)`,
+    [input.townName, input.actor, input.target, input.op, input.rank]
+  );
+}
+
+/** Pending actions for the Luanti poller to apply. */
+export async function listPendingTownActions(limit = 50): Promise<TownActionRow[]> {
+  const res = await query<TownActionRow>(
+    `SELECT id, town_name, actor, target, op, rank
+       FROM town_actions
+      WHERE status = 'pending'
+      ORDER BY id ASC
+      LIMIT $1`,
+    [limit]
+  );
+  return res.rows;
+}
+
+/** Close out an action once the world applied or rejected it. */
+export async function resolveTownAction(
+  id: number,
+  result: "applied" | "rejected",
+  detail?: string
+): Promise<void> {
+  await query(
+    `UPDATE town_actions SET status = $2, detail = $3, applied_at = now()
+      WHERE id = $1 AND status = 'pending'`,
+    [id, result, detail ?? null]
+  );
 }
