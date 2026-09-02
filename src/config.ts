@@ -96,4 +96,31 @@ export const config = {
   btcpayApiKey: process.env.BTCPAY_API_KEY ?? "",
   btcpayStoreId: process.env.BTCPAY_STORE_ID ?? "",
   btcpayWebhookSecret: process.env.BTCPAY_WEBHOOK_SECRET ?? "",
+  // How much a payment may fall short and still settle, in percent. Real on-chain
+  // payments land a hair under the invoice all the time (a wallet's fee estimate, a
+  // rate that moved between quote and broadcast), and BTCPay's default 0 turns that
+  // into an expired invoice the player actually paid for. Applied by BTCPay itself,
+  // per invoice: within tolerance it sends InvoiceSettled and the credit path below
+  // is untouched — the shortfall is never reconciled by hand here.
+  // `||`, not `??`: a blank or non-numeric value must fall back, not become NaN.
+  btcpayPaymentTolerance: Number(process.env.BTCPAY_PAYMENT_TOLERANCE) || 3,
+  // CaosEngine — assisted incubation. Empty base URL means the /incubation routes answer
+  // 503 instead of charging credits for a lot nobody will ever mine.
+  caosEngineUrl: process.env.CAOS_ENGINE_URL ?? "",
+  // Not read by CaosEngine today (its auth guards are commented out on that side) — kept
+  // so turning them on is an env change here, not a deploy. A secret: never log it.
+  caosApiKey: process.env.CAOS_API_KEY ?? "",
+  // Absolute, PUBLICLY REACHABLE base URL of this server. It is what a lot's webhook URL
+  // is built from, so CaosEngine can only deliver shares if this resolves from its host —
+  // localhost is fine only when both run on the same machine.
+  publicUrl: process.env.HASHIMON_PUBLIC_URL ?? "",
+  // P9: one hour, counted from ASSIGNMENT, not from payment. The longest lot (50 marks)
+  // takes ~6 minutes, so this is 10x the worst case — past it the miner is genuinely
+  // hung and the lot refunds in full, unprompted.
+  // `||`, not `??`: an unset variable is not the only way this arrives empty — an Ansible
+  // template that rendered nothing, or a blank line in .env, both give "" here, and
+  // Number("") is 0. A zero timeout expires and refunds every lot the instant it is
+  // assigned, while the pool keeps mining a batch nobody will ever collect; a non-numeric
+  // value gives NaN, which reaches Postgres as 'NaN milliseconds' and 500s every read.
+  incubationLotTimeoutMs: Number(process.env.INCUBATION_LOT_TIMEOUT_MS) || 3_600_000,
 } as const;

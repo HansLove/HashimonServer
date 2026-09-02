@@ -217,6 +217,8 @@ function bip34HeightPush(height: number): string {
 //level the sibling of index 0 is always position 1, and index 0's own combined value never
 //feeds into any other branch entry — so it can be built from the OTHER txids alone, once per
 //template, and reused by hashBitcoinJob() for every share regardless of extranonce.
+//Takes txids in display (BE) hex — what getblocktemplate returns — and gives the branch back
+//in internal byte order, the Stratum `merkle_branch` convention hashBitcoinJob() folds raw.
 export function computeMerkleBranch(txidsBE: string[]): string[] {
   let level: Buffer[] = [Buffer.alloc(32), ...txidsBE.map((txid) => Buffer.from(txid, "hex").reverse())];
   const branch: Buffer[] = [];
@@ -232,5 +234,5 @@ export function computeMerkleBranch(txidsBE: string[]): string[] {
     level = next;
   }
 
-  return branch.map((b) => Buffer.from(b).reverse().toString("hex"));
+  return branch.map((b) => b.toString("hex"));
 }

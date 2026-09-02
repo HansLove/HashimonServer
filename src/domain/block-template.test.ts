@@ -24,12 +24,12 @@ function fullMerkleRoot(leavesBE: string[]): string {
   return Buffer.from(level[0]!).reverse().toString("hex");
 }
 
-//Folds a merkle branch against a leaf-0 hash the same way hashBitcoinJob() does.
-function foldBranch(leaf0BE: string, branchBE: string[]): string {
+//Folds a merkle branch against a leaf-0 hash the same way hashBitcoinJob() does: the branch
+//is in internal byte order, so siblings are concatenated raw. Only the ends convert to display.
+function foldBranch(leaf0BE: string, branch: string[]): string {
   let root: Buffer = Buffer.from(leaf0BE, "hex").reverse();
-  for (const siblingBE of branchBE) {
-    const siblingLE = Buffer.from(siblingBE, "hex").reverse();
-    root = doubleSha256Buffer(Buffer.concat([root, siblingLE]));
+  for (const sibling of branch) {
+    root = doubleSha256Buffer(Buffer.concat([root, Buffer.from(sibling, "hex")]));
   }
   return Buffer.from(root).reverse().toString("hex");
 }
@@ -61,9 +61,10 @@ async function fetchTxidsOnce(): Promise<string[] | null> {
 test("computeMerkleBranch matches a hand-computed small tree (incl. odd-node duplication)", () => {
   const txids = ["aa".repeat(32), "bb".repeat(32), "cc".repeat(32)];
   const branch = computeMerkleBranch(txids);
+  //Internal byte order — the reverse of the display hex a block explorer would show.
   assert.deepEqual(branch, [
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "2885b9e652a4dc10a40f916a8bfbb051464adb66baddbe18ee064936dc842faf",
+    "af2f84dc364906ee18beddba66db4a4651b0fb8b6a910fa410dca452e6b98528",
   ]);
 });
 
