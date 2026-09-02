@@ -12,8 +12,10 @@ import {
   registerLuantiGuest,
 } from "@/domain/players";
 import {
+  listPendingTownActions,
   presentTerritory,
   replaceTownClaims,
+  resolveTownAction,
   upsertPlayerTerritory,
   type TownClaimInput,
 } from "@/domain/territory";
@@ -125,11 +127,15 @@ internalRouter.post(
   })
 );
 
-// A mapblock coordinate pair [x, z]. Bounds keep a bad push from ballooning the payload.
-const blockPair = z.tuple([
-  z.number().int().min(-1_000_000).max(1_000_000),
-  z.number().int().min(-1_000_000).max(1_000_000),
-]);
+// A mapblock coordinate triple [x, y, z] — the world is 3D. Bounds keep a bad push
+// from ballooning the payload.
+const coord = z.number().int().min(-1_000_000).max(1_000_000);
+const blockTriple = z.tuple([coord, coord, coord]);
+
+const memberSchema = z.object({
+  name: z.string().min(1).max(64),
+  rank: z.enum(["mayor", "comayor", "resident"]),
+});
 
 const townsSchema = z.object({
   towns: z
@@ -139,10 +145,11 @@ const townsSchema = z.object({
         blockCount: z.number().int().min(0).max(100_000).default(0),
         memberCount: z.number().int().min(0).max(100_000).default(0),
         mayor: z.string().max(20).nullable().optional(),
-        home: blockPair.nullable().optional(),
+        home: blockTriple.nullable().optional(),
         // Capped per town: Towny's default claim cap is 64, unlimited by priv; 20k is a
         // generous ceiling that still bounds the row.
-        blocks: z.array(blockPair).max(20_000).default([]),
+        blocks: z.array(blockTriple).max(20_000).default([]),
+        members: z.array(memberSchema).max(2_000).default([]),
       })
     )
     .max(5_000),
@@ -163,11 +170,44 @@ internalRouter.post(
       memberCount: t.memberCount,
       mayor: t.mayor ?? null,
       homeX: t.home ? t.home[0] : null,
-      homeZ: t.home ? t.home[1] : null,
+      homeY: t.home ? t.home[1] : null,
+      homeZ: t.home ? t.home[2] : null,
       blocks: t.blocks,
+      members: t.members,
     }));
     const count = await replaceTownClaims(input);
     enrich({ towns_result: "ok", town_count: count });
     res.json({ ok: true, townCount: count });
+  })
+);
+
+/** The Luanti world polls this for political actions the website queued (co-mayor
+ *  promote/demote). It re-validates each against live Towny before applying, so this
+ *  is a work queue, not authority. */
+internalRouter.get(
+  "/internal/luanti-town-actions",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const actions = await listPendingTownActions(50);
+    enrich({ town_action_count: actions.length });
+    res.json({ actions });
+  })
+);
+
+const ackSchema = z.object({
+  id: z.number().int().positive(),
+  result: z.enum(["applied", "rejected"]),
+  detail: z.string().max(200).optional(),
+});
+
+/** The world acks an action once it applied or rejected it in Towny. */
+internalRouter.post(
+  "/internal/luanti-town-actions/ack",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { id, result, detail } = ackSchema.parse(req.body ?? {});
+    await resolveTownAction(id, result, detail);
+    enrich({ town_action_ack: result, town_action_id: id });
+    res.json({ ok: true });
   })
 );

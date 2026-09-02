@@ -21,6 +21,38 @@
 
 export const BIRTH_IDENTITY_VERSION = 2;
 
+//CERRADA el 2026-09-01. La Capa A no vuelve a cambiar sin renacer a todos.
+//
+//`speciesKey` entra en el preimagen del ADN, así que tocar la tabla de
+//elementos, las ventanas solares o la regla del número de vida cambiaría el ADN
+//de toda criatura viva y rompería su proof-of-work. No es refactorizable: es
+//protocolo.
+//
+//BIRTH_IDENTITY_FINGERPRINT sella el comportamiento completo. Es el SHA-256 de
+//las 17,897 líneas `fecha|vida|elemento|espíritu|speciesKey` de 1970 a 2018, en
+//orden cronológico. Cualquier cambio en el algoritmo la mueve, y el test la
+//compara: no hay forma de alterar la Capa A sin que un test grite.
+//
+//Si algún día hay que cambiarla de verdad, se sube BIRTH_IDENTITY_VERSION y se
+//archivan las criaturas de la versión anterior (ver docs/NACIMIENTO_V2.md §4);
+//nunca se reescribe en sitio.
+export const BIRTH_IDENTITY_FINGERPRINT =
+  "66bcd585032c3e034fdb1a5e8af394f2cfa9fe96ee0b493f2487320ea7f0bb1f";
+
+//Vectores dorados: comprobables a mano, sin ejecutar nada. Suma los dígitos,
+//redúcelos, mira la tabla de elementos y la ventana solar.
+export const BIRTH_GOLDEN_VECTORS: ReadonlyArray<
+  readonly [dob: string, lifeNumber: number, element: ElementKey, spirit: SpiritKey]
+> = [
+  ["1996-01-06", 5, "aire", "bloom"],       //suma 32 -> 3+2 = 5
+  ["1979-12-31", 33, "eléctrico", "bloom"], //suma 33, maestro: no se reduce
+  ["2000-02-29", 6, "agua", "mirror"],      //suma 15 -> 6. Bisiesto
+  ["1970-01-01", 1, "fuego", "bloom"],      //suma 19 -> 10 -> 1. Primer día del rango
+  ["2018-12-31", 9, "agua", "bloom"],       //suma 18 -> 9. Último día del rango
+  ["2001-01-20", 6, "agua", "bloom"],       //suma 6. Víspera del cambio de signo
+  ["2001-01-21", 7, "aire", "hearth"],      //suma 7. El signo cambia el día 21
+];
+
 //Elementos Genesis, en la ortografía EXACTA que exige compiler.ts TYPES (con
 //acento). El alias ascii sólo existe para construir claves e identificadores.
 export type ElementKey = "fuego" | "agua" | "aire" | "tierra" | "eléctrico";
@@ -169,16 +201,16 @@ export const SPIRITS: readonly Spirit[] = [
   //PROVISIONAL
   { key: "road", name: "Road", nameEs: "Camino",
     archetype: "viaje, constancia, libertad",
-    line: ["livestock", "cervid", "equine"], kin: null },
+    line: ["equine", "cervid"], kin: null },
   { key: "key", name: "Key", nameEs: "Llave",
     archetype: "ingenio, oportunidad, supervivencia",
-    line: ["rodent", "marsupial"], kin: null },
+    line: ["serpentine"], kin: "edge" },
   { key: "forge", name: "Forge", nameEs: "Fragua",
     archetype: "creación, voluntad, transformación",
-    line: ["construct", "humanoid"], kin: "hearth" },
+    line: ["ape", "construct", "humanoid"], kin: "hearth" },
   { key: "bloom", name: "Bloom", nameEs: "Brote",
     archetype: "cambio, renovación, crecimiento",
-    line: ["amphibian", "flora", "arthropod"], kin: null },
+    line: ["arthropod", "flora"], kin: null },
 ];
 
 

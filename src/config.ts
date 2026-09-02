@@ -40,6 +40,17 @@ export const config = {
   //con "caos-core@2" (hashimons.ts usa CORE_VERSION directamente). El campo del
   //log es lo que se consulta para saber qué reglas produjeron una fila, así que
   //mentir ahí es peor que no tenerlo.
+  //Anthropic. Sin clave, la ruta /chat responde 503 y lo dice: nunca falla en
+  //silencio ni cae a un modelo distinto sin avisar.
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
+  // Required for multi-workspace / identity-linked keys (header anthropic-workspace-id).
+  // Find it in Claude Console → Settings → Workspaces (wrkspc_…).
+  anthropicWorkspaceId: process.env.ANTHROPIC_WORKSPACE_ID ?? "",
+  anthropicModel: process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5",
+  //Turnos gratis por criatura antes de empezar a cobrar créditos.
+  chatFreeTurns: Number(process.env.CHAT_FREE_TURNS ?? 20),
+  //Créditos por turno una vez agotado el cupo.
+  chatCreditsPerTurn: Number(process.env.CHAT_CREDITS_PER_TURN ?? 1),
   algoVersion: process.env.ALGO_VERSION ?? CORE_VERSION,
   // Stamped on every log event so a failure can be traced back to the deploy that
   // shipped it. The image has no .git, so the Dockerfile bakes it in as a build arg.
