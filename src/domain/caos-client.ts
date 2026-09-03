@@ -50,7 +50,7 @@ export async function requestHighEnergy(input: HighEnergyRequest): Promise<HighE
         "content-type": "application/json",
         //CaosEngine's apiKeyGuard is commented out today, so this is inert. Sending it
         //anyway means switching their guard on is an env change here, not a deploy.
-        ...(config.caosApiKey ? { "x-api-key": config.caosApiKey } : {}),
+        ...(config.caosApiKey ? { "X-Caos-Key": config.caosApiKey } : {}),
       },
       body: JSON.stringify({
         address: input.address,
