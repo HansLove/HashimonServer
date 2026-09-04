@@ -101,6 +101,24 @@ CREATE TABLE IF NOT EXISTS town_actions (
 );
 CREATE INDEX IF NOT EXISTS town_actions_pending_idx ON town_actions(status) WHERE status = 'pending';
 
+-- Alliances between towns (Towny has no nations/alliances of its own — this is the
+-- meta-diplomacy layer the website owns). A pair is stored canonically (town_a < town_b)
+-- so one row = one relationship. An alliance is a PEACE PACT: the Luanti world reads the
+-- active ones and suppresses auto-war / blocks attacks between allied towns, so allied
+-- neighbours form one contiguous peaceful bloc. proposed → active on the other town's
+-- mayor accepting. The API is authoritative here (unlike ranks, the world never writes).
+CREATE TABLE IF NOT EXISTS town_alliances (
+  id          bigserial PRIMARY KEY,
+  town_a      text NOT NULL,        -- canonical order: town_a < town_b
+  town_b      text NOT NULL,
+  status      text NOT NULL DEFAULT 'proposed',  -- proposed | active
+  proposed_by text NOT NULL,        -- the town that sent the proposal
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (town_a, town_b)
+);
+CREATE INDEX IF NOT EXISTS town_alliances_active_idx ON town_alliances(status) WHERE status = 'active';
+
 -- Bearer session tokens. Thin on purpose; swap for a real auth provider before
 -- production (see README — do not grow this into a home-made auth system).
 CREATE TABLE IF NOT EXISTS sessions (

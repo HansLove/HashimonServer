@@ -1,4 +1,5 @@
 import "dotenv/config";
+import path from "node:path";
 import { CORE_VERSION } from "@/core/index";
 
 function requireEnv(name: string): string {
@@ -123,4 +124,7 @@ export const config = {
   // assigned, while the pool keeps mining a batch nobody will ever collect; a non-numeric
   // value gives NaN, which reaches Postgres as 'NaN milliseconds' and 500s every read.
   incubationLotTimeoutMs: Number(process.env.INCUBATION_LOT_TIMEOUT_MS) || 3_600_000,
+  // discovery_maps terrain PNGs for the public cadastral underlay. Absolute path or
+  // relative to process.cwd(); create-on-write in domain/map-tiles.ts.
+  mapTilesDir: process.env.MAP_TILES_DIR ?? path.join(process.cwd(), "data", "map-tiles"),
 } as const;

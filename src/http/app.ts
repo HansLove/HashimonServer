@@ -40,7 +40,8 @@ export function createApp(logger?: Logger) {
   //Swap these two lines and the symptom is an opaque 401 on every delivery.
   app.use(paymentsWebhookRouter);
 
-  app.use(express.json());
+  // 2mb: discovery_maps tiles arrive as base64 PNG (~128×128) on the internal route.
+  app.use(express.json({ limit: "2mb" }));
 
   app.use(healthRouter);
   app.use(sessionRouter);

@@ -19,6 +19,8 @@ import {
   upsertPlayerTerritory,
   type TownClaimInput,
 } from "@/domain/territory";
+import { listActiveAlliancePairs } from "@/domain/diplomacy";
+import { MAP_TILE_SIZE, saveMapTile } from "@/domain/map-tiles";
 
 export const internalRouter = Router();
 
@@ -209,5 +211,43 @@ internalRouter.post(
     await resolveTownAction(id, result, detail);
     enrich({ town_action_ack: result, town_action_id: id });
     res.json({ ok: true });
+  })
+);
+
+/** The Luanti world polls active alliances (as [a,b] town pairs) so hashimon_war can keep
+ *  the peace: no auto-war and no attacks between allied towns. Read-only — the API owns
+ *  alliance state; the world never writes it. */
+internalRouter.get(
+  "/internal/luanti-alliances",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const alliances = await listActiveAlliancePairs();
+    enrich({ alliance_count: alliances.length });
+    res.json({ alliances });
+  })
+);
+
+const mapTileSchema = z.object({
+  tileX: z.number().int(),
+  tileZ: z.number().int(),
+  /** Raw PNG bytes, base64-encoded (same encode_png output discovery_maps writes). */
+  png: z.string().min(1).max(1_500_000),
+});
+
+/** Luanti pushes a discovery_maps surface PNG after generate_tile so the website can
+ *  draw the same sea/land underlay under cadastral claims. Upsert by (tileX, tileZ). */
+internalRouter.post(
+  "/internal/luanti-map-tiles",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { tileX, tileZ, png } = mapTileSchema.parse(req.body ?? {});
+    const buf = Buffer.from(png, "base64");
+    const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    if (buf.length < 8 || !buf.subarray(0, 8).equals(sig)) {
+      throw new AppError(400, "png must be a PNG file", "invalid_png");
+    }
+    await saveMapTile(tileX, tileZ, buf);
+    enrich({ map_tile: "ok", tile_x: tileX, tile_z: tileZ, bytes: buf.length });
+    res.json({ ok: true, tileSize: MAP_TILE_SIZE, tileX, tileZ });
   })
 );

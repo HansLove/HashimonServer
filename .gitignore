@@ -6,3 +6,4 @@ dist/
 .secrets
 .claude/worktrees/
 CLAUDE.local.md
+data/map-tiles/
