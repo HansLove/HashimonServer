@@ -73,7 +73,9 @@ const closeSchema = z.object({
   status: z.string().min(1),
   sharesDelivered: z.number().int().nonnegative().optional(),
   sharesTotal: z.number().int().nonnegative().optional(),
-  terminationReason: z.string().optional(),
+  //CaosEngine sends explicit `null` for a completed batch, not omission — `.optional()`
+  //alone rejects that and turns every completed-batch closure into a 400.
+  terminationReason: z.string().nullable().optional(),
 });
 
 incubationWebhookRouter.post(
@@ -134,7 +136,7 @@ incubationWebhookRouter.post(
       //Delivery is counted from the ledger, never from the number the pool reports: the
       //refund is money, and the marks we actually verified are the only honest basis for it.
       const status = statusForTermination(close.data.status, lot.shares_delivered, lot.shares_requested);
-      const closed = await closeLotById(lot.id, status, close.data.terminationReason);
+      const closed = await closeLotById(lot.id, status, close.data.terminationReason ?? undefined);
       enrich({
         lot_status: closed?.status ?? lot.status,
         lot_close_reason: close.data.terminationReason ?? null,
