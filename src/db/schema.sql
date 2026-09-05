@@ -516,3 +516,89 @@ CREATE TABLE IF NOT EXISTS chat_turns (
 );
 CREATE INDEX IF NOT EXISTS chat_turns_recent_idx
   ON chat_turns (hashimon_id, created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Alen Gregory — el villano único de Hashima.
+--
+-- "Sólo puede haber uno en todo el mapa" es una regla del juego, así que aquí es
+-- una restricción y no una convención: alen_state tiene una sola fila por el
+-- CHECK (id = 1). La ficha del mundo (mod_storage) es la autoridad en vivo; esta
+-- tabla es la proyección que lee el planificador y, más adelante, la web.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS alen_state (
+  id          int PRIMARY KEY DEFAULT 1 CONSTRAINT alen_state_singleton CHECK (id = 1),
+  alive       boolean NOT NULL DEFAULT false,
+  pos_x       double precision,
+  pos_y       double precision,
+  pos_z       double precision,
+  hp          integer NOT NULL DEFAULT 0,
+  max_hp      integer NOT NULL DEFAULT 0,
+  mood        text,
+  observed    boolean NOT NULL DEFAULT false,  -- ¿hay alguien mirándolo ahora?
+  digest      jsonb,                           -- último informe comprimido del mundo
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- La cola de órdenes. Misma forma que town_actions: el servidor PIDE, el mundo
+-- revalida y decide, y el ack devuelve el motivo exacto del rechazo — sin ese
+-- motivo el planificador nunca aprende y las dos mitades divergen en silencio.
+CREATE TABLE IF NOT EXISTS alen_orders (
+  id          bigserial PRIMARY KEY,
+  plan        jsonb NOT NULL,                  -- { ttl, verbs: [...] }
+  source      text NOT NULL DEFAULT 'admin',   -- admin | planner | model
+  reason      text,                            -- por qué se emitió (para depurar al planificador)
+  status      text NOT NULL DEFAULT 'pending', -- pending | applied | rejected
+  detail      text,                            -- el motivo que devolvió el mundo
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  applied_at  timestamptz
+);
+CREATE INDEX IF NOT EXISTS alen_orders_pending_idx ON alen_orders(status) WHERE status = 'pending';
+
+-- Novedades: lo que dispara pensar. El planificador NO corre con un temporizador
+-- — corre cuando pasó algo que no había pasado. Esta tabla es esa señal, y su
+-- ritmo es directamente la factura de tokens.
+CREATE TABLE IF NOT EXISTS alen_events (
+  id          bigserial PRIMARY KEY,
+  kind        text NOT NULL,   -- nuevo_jugador | herido | plan_fallido | plan_completo | derrotado | provocado
+  actor       text,            -- jugador implicado, si lo hay
+  payload     jsonb,
+  consumed    boolean NOT NULL DEFAULT false,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS alen_events_unconsumed_idx ON alen_events(created_at) WHERE consumed = false;
+
+-- ---------------------------------------------------------------------------
+-- Map markers (waypoints) — API is authoritative; Luanti applies into discovery_maps.
+-- Claims stay world-owned; this is pins only (personal / nation POI / Hashimon quest).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS map_markers (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind             text NOT NULL
+                     CONSTRAINT map_markers_kind CHECK (kind IN ('player', 'nation', 'hashimon')),
+  owner_player_id  uuid REFERENCES players(id) ON DELETE CASCADE,
+  town_name        text,
+  hashimon_id      uuid REFERENCES hashimons(id) ON DELETE CASCADE,
+  x                double precision NOT NULL,
+  y                double precision NOT NULL,
+  z                double precision NOT NULL,
+  label            text NOT NULL DEFAULT ''
+                     CONSTRAINT map_markers_label_len CHECK (char_length(label) <= 80),
+  color_index      integer NOT NULL DEFAULT 1
+                     CONSTRAINT map_markers_color CHECK (color_index BETWEEN 1 AND 8),
+  status           text NOT NULL DEFAULT 'active'
+                     CONSTRAINT map_markers_status CHECK (status IN ('active', 'completed', 'dismissed')),
+  meta             jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  completed_at     timestamptz,
+  CONSTRAINT map_markers_owner_by_kind CHECK (
+    (kind = 'player'   AND owner_player_id IS NOT NULL AND town_name IS NULL AND hashimon_id IS NULL) OR
+    (kind = 'nation'   AND town_name IS NOT NULL AND hashimon_id IS NULL) OR
+    (kind = 'hashimon' AND owner_player_id IS NOT NULL AND hashimon_id IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS map_markers_owner_active_idx
+  ON map_markers (owner_player_id, status) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS map_markers_town_active_idx
+  ON map_markers (town_name, status) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS map_markers_hashimon_active_idx
+  ON map_markers (hashimon_id, status) WHERE status = 'active';

@@ -16,6 +16,7 @@ import { paymentsRouter } from "@/http/routes/payments";
 import { paymentsWebhookRouter } from "@/http/routes/payments-webhook";
 import { incubationRouter } from "@/http/routes/incubation";
 import { incubationWebhookRouter } from "@/http/routes/incubation-webhook";
+import { mapMarkersRouter } from "@/http/routes/map-markers";
 import { errorMiddleware } from "@/http/errors";
 import { wideEventMiddleware } from "@/http/wide-event";
 
@@ -48,6 +49,7 @@ export function createApp(logger?: Logger) {
   app.use(authRouter);
   app.use(profileRouter);
   app.use(territoryRouter);
+  app.use(mapMarkersRouter);
   app.use(hashimonsRouter);
   app.use(chatRouter);
   app.use(walletRouter);

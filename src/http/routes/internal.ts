@@ -20,7 +20,18 @@ import {
   type TownClaimInput,
 } from "@/domain/territory";
 import { listActiveAlliancePairs } from "@/domain/diplomacy";
+import {
+  ALEN_VERBS,
+  listPendingOrders,
+  recordEvent,
+  resolveOrder,
+  saveState as saveAlenState,
+} from "@/domain/alen";
 import { MAP_TILE_SIZE, saveMapTile } from "@/domain/map-tiles";
+import {
+  arriveForLuantiUsername,
+  markersForLuantiUsername,
+} from "@/domain/map-markers";
 
 export const internalRouter = Router();
 
@@ -249,5 +260,146 @@ internalRouter.post(
     await saveMapTile(tileX, tileZ, buf);
     enrich({ map_tile: "ok", tile_x: tileX, tile_z: tileZ, bytes: buf.length });
     res.json({ ok: true, tileSize: MAP_TILE_SIZE, tileX, tileZ });
+  })
+);
+
+
+// ---------------------------------------------------------------------------
+// Alen Gregory — canal de órdenes. Mismo patrón que las acciones de pueblo:
+// el mundo hace poll, revalida contra su propio estado, aplica y acusa recibo.
+// La API PIDE; el mundo DECIDE. Ninguna de estas rutas es autoridad sobre la
+// partida — si el mundo dice que no, el motivo vuelve en el ack y es lo único
+// que hace mejorable al planificador.
+// ---------------------------------------------------------------------------
+
+/** El mundo recoge sus órdenes pendientes. Pocas a la vez: un plan largo en vuelo
+ *  es peor que dos cortos, porque no se puede renegociar a mitad. */
+internalRouter.get(
+  "/internal/luanti-alen-orders",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const orders = await listPendingOrders(5);
+    enrich({ alen_order_count: orders.length });
+    res.json({ orders });
+  })
+);
+
+const alenAckSchema = z.object({
+  id: z.number().int().positive(),
+  result: z.enum(["applied", "rejected"]),
+  detail: z.string().max(200).optional(),
+});
+
+/** El mundo cierra una orden. `detail` lleva el motivo exacto del rechazo
+ *  ("jugador_cerca:diego", "verbo_no_permitido:rm_rf"), que es la realimentación
+ *  del bucle: sin ella el planificador repite el mismo error para siempre. */
+internalRouter.post(
+  "/internal/luanti-alen-orders/ack",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { id, result, detail } = alenAckSchema.parse(req.body ?? {});
+    await resolveOrder(id, result, detail);
+    enrich({ alen_ack: result, alen_order_id: id, alen_ack_detail: detail ?? null });
+    res.json({ ok: true });
+  })
+);
+
+const alenEventSchema = z.object({
+  kind: z.string().min(1).max(40),
+  actor: z.string().max(40).optional(),
+  payload: z.record(z.unknown()).optional(),
+});
+
+const alenStateSchema = z.object({
+  alive: z.boolean(),
+  pos: z.object({ x: z.number(), y: z.number(), z: z.number() }).nullable().optional(),
+  hp: z.number().int().min(0),
+  maxHp: z.number().int().min(0),
+  mood: z.string().max(40).optional(),
+  observed: z.boolean(),
+  digest: z.record(z.unknown()).optional(),
+  events: z.array(alenEventSchema).max(20).optional(),
+});
+
+/** El mundo sube su informe: proyección de estado más las novedades ocurridas.
+ *  Las novedades son lo que despierta al planificador — no un temporizador. Un
+ *  dragón patrullando un bosque vacío no genera ninguna, y por tanto no cuesta
+ *  un solo token. El ritmo de `events` es directamente la factura. */
+internalRouter.post(
+  "/internal/luanti-alen-state",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const body = alenStateSchema.parse(req.body ?? {});
+    await saveAlenState({
+      alive: body.alive,
+      pos: body.pos ?? null,
+      hp: body.hp,
+      maxHp: body.maxHp,
+      mood: body.mood ?? null,
+      observed: body.observed,
+      digest: body.digest,
+    });
+    for (const ev of body.events ?? []) {
+      await recordEvent({ kind: ev.kind, actor: ev.actor, payload: ev.payload });
+    }
+    enrich({
+      alen_alive: body.alive,
+      alen_observed: body.observed,
+      alen_hp: body.hp,
+      alen_event_count: (body.events ?? []).length,
+    });
+    res.json({ ok: true, verbs: ALEN_VERBS });
+  })
+);
+
+/** Poll synced waypoints / nation POIs / Hashimon quests for one Luanti player. */
+internalRouter.get(
+  "/internal/luanti-map-markers",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const name = String(req.query.name ?? "").trim();
+    if (!name || name.length > 20) {
+      throw new AppError(400, "name query required", "invalid_name");
+    }
+    const pack = await markersForLuantiUsername(name);
+    enrich({
+      username: name,
+      map_marker_count: pack.markers.length,
+      has_capital: Boolean(pack.capital),
+    });
+    res.json({
+      markers: pack.markers,
+      capital: pack.capital,
+    });
+  })
+);
+
+const arriveSchema = z.object({
+  name: z.string().min(1).max(20),
+  markerId: z.string().uuid(),
+  x: z.number().finite(),
+  y: z.number().finite(),
+  z: z.number().finite(),
+});
+
+/** World confirms the player reached a Hashimon destination → care(world) + complete. */
+internalRouter.post(
+  "/internal/luanti-map-markers/arrive",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const body = arriveSchema.parse(req.body ?? {});
+    const result = await arriveForLuantiUsername({
+      username: body.name,
+      markerId: body.markerId,
+      x: body.x,
+      y: body.y,
+      z: body.z,
+    });
+    enrich({
+      username: body.name,
+      map_marker_arrive: result.completed,
+      marker_id: body.markerId,
+    });
+    res.json(result);
   })
 );

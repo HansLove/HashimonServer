@@ -7,6 +7,7 @@ import { getForOwner, present } from "@/domain/hashimons";
 import { anthropicConfigured, AnthropicError } from "@/domain/anthropic";
 import { ChatDenied, care, loadState, speak } from "@/domain/chat";
 import { elementOfSpeciesKey, spiritOfSpeciesKeyOrNull } from "@/domain/chat-helpers";
+import { questForHashimon } from "@/domain/map-markers";
 
 export const chatRouter = Router();
 
@@ -25,13 +26,19 @@ chatRouter.get(
     const row = await getForOwner(req.params.id!, req.player!.id);
     if (!row) throw new AppError(404, "not found", "not_found");
     const state = await loadState(row.id, req.player!.id);
-    enrich({ hashimon_id: row.id, wellbeing: state.wellbeing.overall });
+    const worldQuest = await questForHashimon(req.player!.id, row.id, row.name);
+    enrich({
+      hashimon_id: row.id,
+      wellbeing: state.wellbeing.overall,
+      has_world_quest: Boolean(worldQuest),
+    });
     res.json({
       wellbeing: state.wellbeing,
       keepsakes: state.keepsakes,
       freeTurnsLeft: state.freeTurnsLeft,
       credits: state.credits,
       provider: anthropicConfigured() ? "ready" : "unconfigured",
+      worldQuest,
     });
   })
 );

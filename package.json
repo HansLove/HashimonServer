@@ -17,7 +17,7 @@
     "migrate:dev": "node --import tsx src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
     "validate:birth": "node --import tsx scripts/validate-birth-identity.mts",
-    "test": "node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts src/domain/block-template.test.ts src/domain/bitcoin-address.test.ts src/domain/payments.test.ts src/domain/incubation.test.ts src/http/wide-event.test.ts src/domain/magi.test.ts"
+    "test": "node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts src/domain/block-template.test.ts src/domain/bitcoin-address.test.ts src/domain/payments.test.ts src/domain/incubation.test.ts src/http/wide-event.test.ts src/domain/magi.test.ts src/domain/map-markers.test.ts"
   },
   "dependencies": {
     "@noble/secp256k1": "2.2.3",
