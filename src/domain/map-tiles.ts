@@ -34,10 +34,18 @@ export async function saveMapTile(
   await writeFile(tilePath(tileX, tileZ), png);
 }
 
-/** List every stored tile as [tileX, tileZ] pairs, sorted for stable responses. */
+/** List every stored tile as [tileX, tileZ] pairs, sorted for stable responses.
+ *  Missing dir → empty list (don't mkdir here: the container may be read-only until
+ *  a volume is mounted; uploads create the dir via saveMapTile). */
 export async function listMapTiles(): Promise<[number, number][]> {
-  await ensureMapTilesDir();
-  const names = await readdir(tilesDir());
+  let names: string[];
+  try {
+    names = await readdir(tilesDir());
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EACCES") return [];
+    throw err;
+  }
   const out: [number, number][] = [];
   for (const name of names) {
     const m = TILE_RE.exec(name);

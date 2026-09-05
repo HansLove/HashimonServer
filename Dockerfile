@@ -29,9 +29,12 @@ ENV NODE_ENV=production
 ARG COMMIT_SHA=dev
 ENV COMMIT_SHA=${COMMIT_SHA}
 WORKDIR /app
+# Writable store for discovery_maps PNGs (bind-mounted in prod; empty here for local images).
+RUN mkdir -p /app/data/map-tiles && chown -R node:node /app/data
 USER node
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+ENV MAP_TILES_DIR=/app/data/map-tiles
 EXPOSE 4000
 CMD ["node", "dist/server.js"]
