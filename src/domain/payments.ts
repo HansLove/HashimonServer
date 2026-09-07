@@ -62,6 +62,7 @@ export function presentPayment(row: PaymentRow) {
     address: row.address,
     bip21: row.bip21,
     checkoutLink: row.checkout_link,
+    createdAt: row.created_at.toISOString(),
     expiresAt: row.expires_at.toISOString(),
     settledAt: row.settled_at ? row.settled_at.toISOString() : null,
   };
