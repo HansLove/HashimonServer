@@ -3,8 +3,9 @@
 ## Overview
 
 Express wiring, session auth gate, error translation, and the wide-event logging
-pipeline. Every route in `routes/` is a thin adapter over `domain/` — validate
-input, call domain, enrich the request's event, respond.
+pipeline. Every route — the two in `routes/` here, and every module's own
+`http/routes/` — is a thin adapter over that module's `domain/`: validate input,
+call domain, enrich the request's event, respond.
 
 ## Entry Points
 
@@ -14,7 +15,7 @@ input, call domain, enrich the request's event, respond.
   `req.player` and stamps `auth_source`/`custody`/`can_own` on the event.
 - `wide-event::enrich` — the sole way any layer (routes, domain, middleware) adds
   fields to the in-flight request event.
-- `wide-event::trackDbQuery` — called from `db/pool.ts` to accumulate query count
+- `wide-event::trackDbQuery` — called from `core/db/pool.ts` to accumulate query count
   and duration onto the event instead of logging per-query.
 - `errors::AppError` / `errors::asyncHandler` — the only sanctioned way to fail a
   route; thrown `AppError`s become clean JSON, everything else becomes a leak-free 500.
@@ -24,7 +25,7 @@ input, call domain, enrich the request's event, respond.
 **One structured event per request, not scattered log lines.** `wide-event.ts`
 opens a `WideEvent` in `AsyncLocalStorage` before any other middleware runs and
 emits it exactly once, in `res.on("finish")`. Every layer that learns something —
-`requireSession`, route handlers, `errorMiddleware`, `db/pool.ts` — calls `enrich()`
+`requireSession`, route handlers, `errorMiddleware`, `core/db/pool.ts` — calls `enrich()`
 to add a field to that same object; nobody else calls the logger directly. Tests
 (`wide-event.test.ts`) assert exactly one JSON line per request as the core contract.
 
@@ -40,11 +41,11 @@ route template, e.g. `/hashimons/:id`); an unmatched request falls back to
 token past `redact`. Never log the raw URL on a matched route either — resolved
 `:id`s would blow up log cardinality.
 
-**AsyncLocalStorage, not `req.event`.** Chosen because `db/pool.ts` and mining/
+**AsyncLocalStorage, not `req.event`.** Chosen because `core/db/pool.ts` and mining/
 domain code never receive a `Request` object, so passing the event down would mean
 threading it through signatures that don't otherwise need it. `enrich()` is a no-op
 outside a request (`store.getStore()` is undefined) — this is intentional, not a
-bug: `db/migrate.ts` and node:test suites call domain code with no event in flight.
+bug: `core/db/migrate.ts` and node:test suites call domain code with no event in flight.
 
 **`enrich` merges, `trackDbQuery` accumulates.** Fields set via `enrich` overwrite;
 `db_query_count`/`db_duration_ms` add up across the whole request instead of one
@@ -57,7 +58,7 @@ separate secret-header gate (`X-Luanti-Secret`, constant-time compared) for the
 Luanti bridge, and stamps `auth_source: "luanti"` instead. `auth_source` defaults to
 `"none"` on the event and is always overwritten by whichever gate actually ran.
 
-**The Luanti bridge is three routes over one password store (`routes/internal.ts`).**
+**The Luanti bridge is three routes over one password store (`core/http/routes/internal.ts`).**
 `GET /internal/luanti-auth` publishes every named account with a `luanti_password`
 (the engine-format SRP entry `#1#salt#verifier`) plus `can_own` — the mod mirrors that
 list and answers the engine's `get_auth` from it, so guests must be in it too.
@@ -70,7 +71,7 @@ verifier, and the mod refuses in-game password changes. The password entry itsel
 event carries `username`, `register_result`, `register_source` and `player_id`,
 nothing from the body.
 
-**Emission gating (`routes/hashimons.ts`):** `POST /hashimons` requires
+**Emission gating (`hashimon/http/routes/hashimons.ts`):** `POST /hashimons` requires
 `canOwn(player)` (a public key), rejects unknown species, and additionally enforces
 genesis species must use `provenance: "starter"` and only once per player
 (`countStarterEmissions >= 1` → 409). The server derives the birth nonce/DNA itself

@@ -1,63 +1,15 @@
-# Domain
+# Core — domain
 
 ## Overview
-Business logic layer between `src/http/routes/` and `src/db/` — the only place that
-decides what a request is allowed to do to the ledger. Everything here trusts nothing
-from the client and re-derives or re-verifies rather than storing decided values.
+The one piece of domain logic no single bounded context owns: the append-only audit
+log. Everything else that used to live here moved to its module — see
+`player/domain/`, `hashimon/domain/` and `mining/domain/`.
 
 ## Entry Points
-- `players::findOrCreatePlayer` — create-or-restore identity by public key; anonymous if none given.
-- `players::registerOwner` — full web registration: validates species/username/password, mints a starter Hashimon and session in one flow. Also the claim path — see Business Logic.
-- `players::loginOwner`, `players::playerForToken` — password login (argon2, or SRP for a Luanti-only guest) and bearer-token resolution used by `http/auth.ts`.
-- `players::canOwn` — the single gate deciding if a player may own creatures (has `public_key`).
-- `hashimons::emit` — the only way a Hashimon row is created; server always owns the birth nonce.
-- `hashimons::present` — derives the client-facing view (stats/rank/verified) from `dna + pow`; nothing derived is ever stored.
-- `mining::issueJob`, `mining::submitShare` — PoW job lifecycle for a bound Hashimon.
-- `block-template::getPreparedTemplate` — cached, creature-agnostic Bitcoin block template feeding real-target jobs.
-
-## Key Files
-- **crypto.ts** — secp256k1 keygen/validation, scrypt+AES-GCM private-key encryption, and Luanti SRP-6a password entries (three unrelated crypto concerns, kept together because `players.ts` needs all three).
-- **audit.ts** — append-only log writer; must be called with the same transaction `client` as the mutation it records (see Side Effects).
-- **block-template.ts** — talks to a real Bitcoin Core node (`getblocktemplate` RPC) and reduces its response to a compact, extranonce-hole-shaped coinbase + merkle branch; not a mining job itself, `mining.ts` splices per-share extranonce values into it.
-- **bitcoin-address.ts** — decodes a bech32/bech32m segwit address (BIP173/BIP350) into a scriptPubKey; `block-template.ts` uses it to pay the coinbase output to `config.coinbaseAddress` instead of an OP_RETURN. Legacy base58 (`1.../3...`) addresses are unsupported.
-
-## Business Logic
-- **The DB is the only password store for Luanti.** `luanti_password` holds an SRP entry (`#1#<b64 salt>#<b64 verifier>`) built by `crypto::luantiSrpEntry`, byte-compatible with the engine's `encode_srp_verifier` — the mod serves it back to the engine instead of letting a local `auth.sqlite` verifier exist. Two writers: `registerOwner` (web) and `registerLuantiGuest` (in-game signup relayed by `POST /internal/luanti-register`, the only hook the engine leaves, since it never reveals the plaintext). The verifier is derived from the **lowercased** name, which is what kills the old casing divergence.
-- **A Luanti-only guest can log in and claim ownership on the web, same password, no separate hash ever stored.** `loginOwner` falls back to `crypto::luantiSrpVerify` (recomputes the verifier from the SRP entry's own salt, constant-time compare) whenever `password_hash` is `null` — nothing gets written, the SRP entry is verified fresh on every login. `registerOwner`'s username-collision branch checks if the existing row is a reclaimable guest (`password_hash IS NULL AND public_key IS NULL`); if the supplied password verifies against its `luanti_password`, `claimLuantiGuest` runs the same keypair/custody derivation a fresh registration would (`deriveOwnerKeyMaterial`, extracted so both paths share it) and `UPDATE`s the row instead of inserting one — `luanti_password` itself is never touched. The `UPDATE ... WHERE id = $1 AND password_hash IS NULL AND public_key IS NULL` guard is what closes the race between two concurrent claims, same pattern as `claimSelfCustody`. A wrong claim password or an already-claimed row both fail as the same 409 `username_taken` a genuinely-taken username would — no account-existence leak. `/register` returns 200 for a claim, 201 for a fresh row, distinguished by the `claimed` flag on `registerOwner`'s result.
-- **`listLuantiAuthEntries` lists everyone, `can_own` decides ownership.** It returns every row with a username and a password entry, guests included, each carrying `can_own` — the mod needs guests in the mirror to authenticate them at all, so "present in the list" no longer means "is an owner".
-- **Ownership gate.** A player can only own creatures (`POST /hashimons`) if `public_key` is set (`players::canOwn`). Anonymous/guest players (Luanti without a key) can play but not own — enforced at the domain layer, not just HTTP.
-- **Server owns the birth.** `hashimons::emit` generates the birth nonce itself so a client can never grind for a rare DNA; on the astronomically unlikely `dna` unique-constraint collision (Postgres code `23505`) it retries with a new nonce up to 5 times.
-- **Derived, never stored.** Stats, colour, type, rank all come from `present()` recomputing `dna + pow` via the Caos Core on every read — the row only stores provenance and PoW biography, so a ruleset change never requires a data migration.
-- **Genesis starters are gated twice.** `registerOwner` requires `speciesKey` to be in the hardcoded `GENESIS_KEYS` set AND pass `hashimons::isGenesisSpecies` AND exist in the species table — belt-and-suspenders against a bad species key minting a rare creature as a "starter".
-- **Custody model.** If the caller supplies their own `publicKey`, custody is `"player"` (server never sees the private key). If not, the server generates a keypair and encrypts the private key with a key derived from the account password (`crypto::encryptPrivateKey`) — custody `"server_encrypted"`. `players::claimSelfCustody` lets an owner migrate from server-held to self-held by wiping the encrypted blob.
-- **Mining modes.** `mining::issueJob` picks its mode from `config.miningMode`: in `'bound'` (default) it writes the placeholder header (zeroed prevHash, `dna` as merkleRoot, static bits) as before. In `'bitcoin'` it pulls a `PreparedTemplate` from `block-template::getPreparedTemplate`, builds a real header (`prevhashBE`, real `bits`, `curtime` as timestamp), and persists `{...prepared, extranonce1: deriveExtranonce1(row.dna)}` under `header.bitcoin` in the jsonb column; `rowToJob`/`jobResponse` hydrate/expose that payload only when `row.mode === 'bitcoin'`. If the node is unreachable and no template is cached, `issueJob` degrades to `'bound'` rather than failing the request. This template is never submitted to the network (`submitblock` out of scope) — the coinbase pays a real segwit address (`config.coinbaseAddress`, see `bitcoin-address.ts`) but still has no witness commitment, fine for proof-of-work hashing but not for a real broadcast.
-- **Template caching.** `getPreparedTemplate` caches one `PreparedTemplate` in module memory for `config.templateRefreshMs`, so many jobs across many creatures reuse one `getblocktemplate` RPC round-trip; on a fetch error it logs (host only, no credentials) and returns the stale cached template rather than failing the caller.
-- **Merkle branch reuse trick.** `block-template::computeMerkleBranch` treats the coinbase as tree index 0 with a fixed all-zero placeholder leaf; because index-0's sibling is always position 1 and its own value never feeds other branch entries, the branch is computed once per template from the other txids and reused for every share regardless of the per-share extranonce.
-- **Shares are re-verified, never trusted.** `mining::submitShare` calls `verifyJobShare` server-side regardless of what hash the client claims, then dedupes globally by share hash — first via a `SELECT`, then relies on `submitted_shares`'s unique constraint as the race-safe backstop (catches `23505` and converts it to `duplicate_share`).
-- **Best-share update is conditional, not overwrite.** In `submitShare`, `best_share_*` columns only update when the new share's `bits` beats the stored one (`CASE WHEN $4 THEN ... ELSE ...` in the UPDATE) — a weaker accepted share still counts toward `valid_shares`/`total_hashes` but does not regress the best-share record.
-
-## Dependencies
-
-**Internal:**
-- `@/modules/core/core` (`Dna`, `progressionOf`, `verifyStoredPow`, `verifyJobShare`) — the deterministic ruleset; domain calls it to verify/derive, never to decide game outcomes itself.
-- `@/modules/hashimon/data/species` (`Hashimons`) — species registry; gates which `speciesKey` values `emit`/`registerOwner` accept.
-- `@/modules/core/db/pool` (`query`, `withTransaction`) — `emit` and `submitShare` both wrap their INSERT/UPDATE + `audit()` call in one transaction so the audit trail can never desync from the mutation.
-- `@/modules/core/config` — `blockTargetBits`, `jobTtlMs`, `templateRefreshMs`, `btcNodeUrl` all live here; `mining.ts`/`block-template.ts` never hardcode tuning values.
-
-**External:**
-- `argon2` — password hashing for `password_hash` (registerOwner/loginOwner/claimLuantiGuest). It is unrelated to `luanti_password`, whose format is dictated by the engine (SRP-6a verifier); `loginOwner` verifies that one itself via `luantiSrpVerify` when `password_hash` is absent, rather than treating it as an opaque hash.
-- `@noble/secp256k1` — key generation/validation matching the same curve the client/wallet uses.
-
-**Environment Variables:**
-- `btcNodeUrl` (config) — RPC URL with embedded basic-auth credentials for `block-template.ts`; wrong/missing → `getPreparedTemplate` fails silently and serves the last cached template (or `null` before first success).
-- `coinbaseAddress` (config, `HASHIMON_COINBASE_ADDRESS`) — required only when `miningMode` is `'bitcoin'`, no default; `config.ts` throws at import time if unset in that mode. Unused and optional in `'bound'` mode (the default), so a fresh clone still boots without it.
+- `audit::audit` — append-only log writer; must be called with the same transaction `client` as the mutation it records.
 
 ## Side Effects & Constraints
-- `audit()` must be called with the transaction's `client`, not a bare `query()` — passing the wrong client silently writes the audit row outside the transaction, breaking the "commits atomically" guarantee `emit`/`submitShare` rely on.
-- `emit` and `submitShare` are transactional; a caller that only does part of the transaction (e.g. inserts a share row without going through `submitShare`) breaks the dedupe/audit invariant.
-- `block-template.ts` holds a module-level mutable cache (`cached`) — not per-request, shared across all callers in the process; a test or script that needs a fresh template must account for the TTL rather than assuming a clean fetch.
+- `audit()` must be called with the transaction's `client`, not a bare `query()` — passing the wrong client silently writes the audit row outside the transaction, breaking the "commits atomically" guarantee every caller relies on. `hashimon::emit`, `mining::submitShare`, `payments::applyWebhook` and `incubation::applyShare` all depend on this.
 
 ## Common Pitfalls
-- Adding a new mutation to `hashimons`/`mining_jobs` without an `audit()` call breaks the append-only trail other tooling assumes exists for every state change.
-- Forgetting the `23505` retry/duplicate handling when adding new unique-constrained inserts — both `emit` (dna) and `submitShare` (share hash) rely on catching this Postgres error code rather than pre-checking, to close the race window.
-- `getPreparedTemplate` swallowing RPC errors and returning stale/`null` templates means callers must handle `null` explicitly — it does not throw on node downtime.
+- Adding a new mutation anywhere in the ledger without an `audit()` call breaks the append-only trail other tooling assumes exists for every state change.

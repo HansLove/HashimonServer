@@ -8,8 +8,8 @@ Technical reference for replacing Hashimon's simulated local PoW with real proof
 |----------|---------|
 | [docs/HASHIMON_ADN_Y_EVOLUCION.md](./HASHIMON_ADN_Y_EVOLUCION.md) | ADN, compilador, evolución PoW, genesis elemental (español) |
 | [docs/POW_SPEC.md](./POW_SPEC.md) | Byte-level PoW spec + golden test vectors |
-| [server/src/core/pow.ts](../server/src/core/pow.ts) | `hashJob`, `verifyShare`, `leadingZeroBits` |
-| [server/src/domain/hashimons.ts](../server/src/domain/hashimons.ts) | Job issuance + share submission |
+| [server/src/modules/core/core/pow.ts](../server/src/modules/core/core/pow.ts) | `hashJob`, `verifyShare`, `leadingZeroBits` |
+| [server/src/modules/hashimon/domain/hashimons.ts](../server/src/modules/hashimon/domain/hashimons.ts) | Job issuance + share submission |
 | [game/src/content/hashimonMining.js](../game/src/content/hashimonMining.js) | Browser client (fetch job → grind → POST) |
 
 ## Executive summary

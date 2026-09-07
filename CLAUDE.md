@@ -30,23 +30,23 @@ pnpm install          # package manager is pnpm — enforced via preinstall (onl
 pnpm dev               # tsx watch src/server.ts
 pnpm build             # tsc --noEmit, then esbuild bundle to dist/, copies schema.sql
 pnpm start             # node dist/server.js (run build first)
-pnpm migrate:dev       # applies src/db/schema.sql directly — USE THIS in development
-pnpm migrate           # node dist/db/migrate.js — applies dist/db/schema.sql (idempotent)
+pnpm migrate:dev       # applies src/modules/core/db/schema.sql directly — USE THIS in development
+pnpm migrate           # node dist/modules/core/db/migrate.js — applies dist/modules/core/db/schema.sql (idempotent)
 pnpm typecheck         # tsc --noEmit
 pnpm test              # node --import tsx --test — core, auth, payments, incubation,
                        # wide-event suites
                        # (the auth and payments suites need a live Postgres)
 ```
 
-Run a single test file directly: `node --import tsx --test src/core/core.test.ts`
+Run a single test file directly: `node --import tsx --test src/modules/core/core/core.test.ts`
 (node:test files, not a test-runner framework — no `-t`/`--grep` beyond node:test's
 own `--test-name-pattern`).
 
 Requires Node ≥ 20 and Postgres ≥ 13 (`gen_random_uuid`). `cp .env.example .env`
 before running migrate/dev.
 
-**`pnpm migrate` applies the copy in `dist/`, not `src/db/schema.sql`.** `pnpm build`
-is what refreshes that copy (`cp src/db/schema.sql dist/db/schema.sql`), so running
+**`pnpm migrate` applies the copy in `dist/`, not `src/modules/core/db/schema.sql`.** `pnpm build`
+is what refreshes that copy (`cp src/modules/core/db/schema.sql dist/modules/core/db/schema.sql`), so running
 `pnpm migrate` against a stale `dist/` applies an OLD schema and still prints
 `✓ schema applied` — a silent failure that surfaces later as
 `column "…" of relation "players" does not exist`. In development use
@@ -55,31 +55,51 @@ which file it read.
 
 ## Architecture
 
+**Feature-first, not layer-first.** `src/modules/` holds one directory per bounded
+context, and each carries its own layers inside (`domain/`, `http/routes/`, `data/`).
+Listing the module root reads like the game, not like an Express scaffold. A feature
+lives in one directory; only genuinely shared machinery sits in `core/`.
+
 ```
-src/core/     The Caos Core — versioned, deterministic ruleset shared with the client.
-              sha256.ts (byte-identical to client's window.SHA256), dna.ts (DNA
-              derivation), pow.ts (leadingZeroBits, share hashing, rank/stage math,
-              verifyShare/verifyJobShare). This is imported to VERIFY, not to decide —
-              the client runs an equivalent copy to play. core.test.ts guards parity.
-src/data/     Server-side species registry — identity + base stats. Keys gate emission.
-src/db/       pool.ts (pg pool + withTransaction), schema.sql (source of truth for
-              tables), migrate.ts (applies schema.sql, idempotent — no migration files).
-src/domain/   Business logic: players.ts (identity + bearer sessions), hashimons.ts
-              (emission/birth, inventory, present() derived view), mining.ts (PoW job
-              issuance + share submission), credit-plans.ts (the catalogue — where a
-              price comes from), payments.ts (charges + webhook transitions),
-              incubation.ts (the lot ledger — the credit sink), caos-client.ts (the
-              single outbound call), audit.ts (append-only log), crypto.ts.
-src/http/     app.ts (express wiring), auth.ts (requireSession bearer gate), errors.ts
-              (AppError + errorMiddleware), routes/ (one router per resource).
-src/server.ts Entry point.
-src/config.ts Env var parsing — single source for all runtime config.
+src/server.ts   Entry point — the only file at the root of src/.
+src/modules/
+  core/         Generic subdomain: what every other module leans on, plus the HTTP
+                wiring itself.
+    core/       The Caos Core — versioned, deterministic ruleset shared with the
+                client. sha256.ts (byte-identical to client's window.SHA256), dna.ts
+                (DNA derivation), pow.ts (leadingZeroBits, share hashing, rank/stage
+                math, verifyShare/verifyJobShare). Imported to VERIFY, not to decide —
+                the client runs an equivalent copy to play. core.test.ts guards parity.
+    db/         pool.ts (pg pool + withTransaction), schema.sql (source of truth for
+                tables), migrate.ts (applies schema.sql, idempotent — no migrations).
+    http/       app.ts (express wiring), auth.ts (requireSession bearer gate),
+                errors.ts (AppError + errorMiddleware), wide-event.ts,
+                luanti-secret.ts, routes/ (health.ts + internal.ts — the only two
+                routers no single domain owns).
+    domain/     audit.ts, the append-only log written by payments and incubation.
+    config.ts   Env var parsing — single source for all runtime config.
+    logger.ts   pino setup; `redact` is the secrets backstop.
+  hashimon/     Core subdomain — emission/birth, inventory, present() derived view.
+                data/species.ts is the registry whose keys gate emission.
+  mining/       Core subdomain — PoW job issuance + share submission, block-template.ts,
+                bitcoin-address.ts.
+  incubation/   Core subdomain — the lot ledger (the credit sink) and caos-client.ts,
+                the single outbound call.
+  player/       Identity + bearer sessions, crypto.ts, and the auth / session / wallet /
+                profile routers.
+  payments/     Charges + webhook transitions, credit-plans.ts (the catalogue — where a
+                price comes from).
+  companion/    chat.ts, chat-helpers.ts, companion.ts, anthropic.ts.
+  territory/    territory.ts, diplomacy.ts.
+  map/          map-markers.ts, map-tiles.ts.
+  magi/         magi.ts.
+  alen/         alen.ts.
 ```
 
 **What the ledger stores vs. derives.** A `hashimons` row holds only *provenance*
 (dna, species, birth nonce, algo version) and the *PoW biography* (best share, hash
 count, etc.). Stats, colour, type and rank are **never stored** — they're derived
-from `dna + pow` by the Caos Core on read (`present()` in `domain/hashimons.ts`), so
+from `dna + pow` by the Caos Core on read (`present()` in `hashimon/domain/hashimons.ts`), so
 they can never drift or be forged. When the ruleset changes, re-derive; the ledger
 itself needs no migration.
 
@@ -88,7 +108,7 @@ itself needs no migration.
 grind for a rare identity. `dna` is `UNIQUE` in the schema (the anti-duplication
 guarantee).
 
-**Mining jobs (`src/domain/mining.ts`, `mining_jobs` table).** `issueJob()` currently
+**Mining jobs (`src/modules/mining/domain/mining.ts`, `mining_jobs` table).** `issueJob()` currently
 always writes `mode: 'bound'` with a fixed placeholder header (zeroed `prevHash`,
 `dna` as `merkleRoot`, static `bits`) — the row type also allows `'legacy'` and
 `'bitcoin'` modes for future real-target mining, not yet wired up. Jobs TTL out
@@ -98,16 +118,16 @@ accepted shares globally by hash (`submitted_shares` table, plus a DB unique
 constraint as the second line of defense against races).
 
 **Auth model.** Deliberately thin bearer sessions (`sessions` table, `token` PK) —
-`requireSession` (`http/auth.ts`) is the *only* way a request proves identity;
+`requireSession` (`core/http/auth.ts`) is the *only* way a request proves identity;
 swap for a real provider before production. **Poseer = tener llave (`public_key`).**
 Web `/register` creates an owner (username + password + secp256k1 keypair + genesis
 starter, `custody: server_encrypted` or `player`). Anonymous `POST /session` and
 Luanti guests without a `public_key` can play but **cannot** `POST /hashimons` (403
-`cannot_own`) — see `canOwn` in `domain/players.ts`.
+`cannot_own`) — see `canOwn` in `player/domain/players.ts`.
 
 **Luanti bridge — the DB is the only password store.** `X-Luanti-Secret`
-(`LUANTI_SERVER_SECRET`) gates `src/http/routes/internal.ts`. `luanti_password` holds an
-engine-format SRP entry (`#1#salt#verifier`, `domain/crypto.ts::luantiSrpEntry`), written
+(`LUANTI_SERVER_SECRET`) gates `src/modules/core/http/routes/internal.ts`. `luanti_password` holds an
+engine-format SRP entry (`#1#salt#verifier`, `player/domain/crypto.ts::luantiSrpEntry`), written
 by both signup surfaces: web `/register` and `POST /internal/luanti-register` (the mod
 relays what the engine built for an in-game signup — the plaintext never leaves the
 client). The world polls `GET /internal/luanti-auth` every ~2s for **every** named
@@ -115,18 +135,18 @@ account plus `can_own`, answers the engine's `get_auth` from that mirror, and ca
 `POST /internal/luanti-bind` on join for owners. Changing a password in-game is refused;
 the web is the only place it changes. A Luanti-only guest (no `password_hash`, no
 `public_key`) can log in on the web with that same Luanti password
-(`domain/crypto.ts::luantiSrpVerify` recomputes the SRP verifier, no separate hash is
+(`player/domain/crypto.ts::luantiSrpVerify` recomputes the SRP verifier, no separate hash is
 stored) and can claim ownership through the same `POST /register` — same username,
 same password, a conditional `UPDATE` (same race-closing pattern as
-`domain/players.ts::claimSelfCustody`) instead of an `INSERT` — which mints a keypair, custody and a starter over the existing row without
+`player/domain/players.ts::claimSelfCustody`) instead of an `INSERT` — which mints a keypair, custody and a starter over the existing row without
 touching `luanti_password`. `/register` returns 200 on a claim, 201 on a fresh
 registration; any other name collision (wrong password, or a row that already has a
 `password_hash`/`public_key`) is still 409 `username_taken`.
 
-**Credit purchases (`src/domain/payments.ts`, `credits_plans` + `payments` tables).**
+**Credit purchases (`src/modules/payments/domain/payments.ts`, `credits_plans` + `payments` tables).**
 The only path by which `players.credits` ever moves. A request carries a **`sku`, never
 an amount** — `planFor()` reads the price, and the zod schema in
-`http/routes/payments.ts` is `.strict()` so a smuggled `amount`/`price` is a 400 rather
+`payments/http/routes/payments.ts` is `.strict()` so a smuggled `amount`/`price` is a 400 rather
 than a field quietly ignored. `payments` snapshots `sku`/`credits`/`amount_usd` at
 creation: repricing a plan must never revalue a charge already issued, so the FK to
 `credits_plans` is referential integrity and nothing more.
@@ -167,15 +187,15 @@ library verifies the HMAC only `if (config.webhookSecret)`, and nothing else fai
 variable is missing. `requireWebhookSecret` answers 503 before the middleware is reached.
 Confirmed both ways — without the guard an unsigned POST minted 3000 credits.
 
-**The webhook router is mounted before `express.json()`** (`http/app.ts`) and it is the
+**The webhook router is mounted before `express.json()`** (`core/http/app.ts`) and it is the
 only one that is: the HMAC covers the raw bytes. Reverse those two lines and every
 delivery fails with an opaque 401. `payments-webhook.ts` maps
 `BTCPayWebhookSignatureError` to 401 on purpose — as an unknown error it would surface as
 a 500, which tells BTCPay to keep retrying a delivery that can never be accepted.
-`domain/payments.ts` builds its own `BTCPayClient` lazily (not at import: `migrate.ts` and
+`payments/domain/payments.ts` builds its own `BTCPayClient` lazily (not at import: `migrate.ts` and
 the test suites load domain code with no gateway configured).
 
-**Assisted incubation (`src/domain/incubation.ts`, `caos_pricing` + `caos_lots`).** The
+**Assisted incubation (`src/modules/incubation/domain/incubation.ts`, `caos_pricing` + `caos_lots`).** The
 credit sink, and the second and last mover of `players.credits`. A request carries a
 **count, never an amount**; `GET /incubation/pricing` publishes the ladder **already net of
 the tier discount** (10-24 arrives as `9.8`, not `10` + `2%`) so a client cannot apply it
@@ -246,27 +266,30 @@ not validate is a 400, never a close. Hex fields are validated *there*, at the b
 template would otherwise reach the verifier and come back as `hash_mismatch` — the one verdict
 that accuses the pool of lying about its work.
 
-**Logging is one wide event per request.** `src/http/wide-event.ts` holds an
-`AsyncLocalStorage<WideEvent>`; `wideEventMiddleware` (mounted first in `http/app.ts`) is
+**Logging is one wide event per request.** `src/modules/core/http/wide-event.ts` holds an
+`AsyncLocalStorage<WideEvent>`; `wideEventMiddleware` (mounted first in `core/http/app.ts`) is
 the *only* thing that emits a request log line, in `res.on("finish")`. Everything else
 calls `enrich({ … })` to add fields to the event already in flight — never `console.*`,
 never its own `logger.info`. `enrich` is a no-op outside a request, so domain code stays
-callable from `db/migrate.ts` and from the test suites. `path` is the route template
+callable from `core/db/migrate.ts` and from the test suites. `path` is the route template
 (`/hashimons/:id`), never the resolved URL — that field is what queries group by.
-Secrets never enter the event: `redact` in `src/logger.ts` is the backstop, the rule is
+Secrets never enter the event: `redact` in `src/modules/core/logger.ts` is the backstop, the rule is
 `dna_prefix` over `dna` and `safeHost()` over `config.btcNodeUrl`. Only three events live
 outside the request cycle: `server_start`, `shutdown` and `block_template_fetch`. See the
 logging section in README.md.
 
 **Path aliases.** `@/*` maps to `src/*` (tsconfig `paths` + esbuild bundling) — use
-`@/domain/...`, `@/core/...` etc., never relative `../../` imports.
+`@/modules/<domain>/...`, e.g. `@/modules/player/domain/players`,
+`@/modules/core/http/errors`, never relative `../../` imports. Because every import
+is absolute, moving a file between modules never rewrites its own imports — only the
+ones naming it.
 
 ## Full API reference and manual smoke-test commands
 
 See README.md — it documents every route (auth requirements, request/response
 shapes for `/register`, `/login`, `/session`, `/hashimons`, `/wallet/*`,
 `/internal/*`), the `POST /register` contract in full, and curl-based smoke checks.
-Don't duplicate that table here; read it before touching `src/http/routes/`.
+Don't duplicate that table here; read it before touching `src/modules/*/http/routes/`.
 
 ## Do not build by hand
 

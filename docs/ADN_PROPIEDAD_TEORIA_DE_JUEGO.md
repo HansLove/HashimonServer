@@ -33,7 +33,7 @@ ADN_Genesis = SHA256( ownerPublicKey : speciesKey : birthday )
 
 `birthday` es opcional — si el jugador no lo da, se usa `""` fija: `SHA256(ownerPublicKey:speciesKey:"")`.
 
-### 1.2 Fórmula anterior (histórica, aún visible en `api/src/core/dna.ts`)
+### 1.2 Fórmula anterior (histórica, aún visible en `api/src/modules/core/core/dna.ts`)
 
 ```typescript
 export const Dna = {
@@ -54,7 +54,7 @@ Nota lo que **no** entra en ninguna de las dos fórmulas: la firma del dueño. E
 ## 2. Qué NO es el ADN (para descartar bien la confusión)
 
 - No prueba propiedad — no incluye ninguna firma ni challenge-response contra la llave pública.
-- No se guarda el "look" derivado (tipo, color, arquetipo, stats escalados) en PostgreSQL — se recomputa on-demand desde `dna` + `speciesKey` cada vez que se muestra. Comentario explícito en `api/src/db/schema.sql`: *"Stats and look are NOT stored: they are derived from dna + pow by the Caos Core."*
+- No se guarda el "look" derivado (tipo, color, arquetipo, stats escalados) en PostgreSQL — se recomputa on-demand desde `dna` + `speciesKey` cada vez que se muestra. Comentario explícito en `api/src/modules/core/db/schema.sql`: *"Stats and look are NOT stored: they are derived from dna + pow by the Caos Core."*
 - No es una lotería competitiva para Genesis — el poder real viene de PoW (`×1.18^stage`), no de la tirada de ADN.
 
 ---
@@ -152,7 +152,7 @@ Se toman los **N bloques con mayor `extraBits`** de la ventana (empates por altu
 
 Por qué esta métrica y no el número de transacciones, las comisiones o la marca de tiempo:
 
-- **Ya existe en el código.** `leadingZeroBits()` está en [`api/src/core/pow.ts`](../src/core/pow.ts) y es exactamente la misma función con la que evolucionan los Hashimon. Un solo concepto de "suerte" en todo el sistema.
+- **Ya existe en el código.** `leadingZeroBits()` está en [`api/src/modules/core/core/pow.ts`](../src/modules/core/core/pow.ts) y es exactamente la misma función con la que evolucionan los Hashimon. Un solo concepto de "suerte" en todo el sistema.
 - **Infalsificable y no manipulable.** Nadie puede volver un bloque más afortunado después de minado.
 - **Top-N, no umbral.** Un umbral fijo daría 0 criaturas una semana y 200 la siguiente; top-N da exactamente N siempre.
 
@@ -270,7 +270,7 @@ Lo defendible, y es fuerte:
 commitment = SHA256( época ‖ multiplicador ‖ N camadas ‖ ventana de alturas )
 ```
 
-Son 32 bytes; el scriptSig del coinbase tiene ~100 y ya se usa una parte (`COINBASE_TAG_ASCII = "hashimon"`, altura BIP34, extranonce — ver [`block-template.ts`](../src/domain/block-template.ts)). Con esto el historial de emisión queda con marca de tiempo en Bitcoin: no solo verificable, sino **imposible de reescribir retroactivamente**.
+Son 32 bytes; el scriptSig del coinbase tiene ~100 y ya se usa una parte (`COINBASE_TAG_ASCII = "hashimon"`, altura BIP34, extranonce — ver [`block-template.ts`](../src/modules/mining/domain/block-template.ts)). Con esto el historial de emisión queda con marca de tiempo en Bitcoin: no solo verificable, sino **imposible de reescribir retroactivamente**.
 
 **Limitación que hay que decir en voz alta:** el commitment prueba **integridad**, no **completitud**. Se puede verificar que lo publicado es válido y que no fue alterado después; no se puede probar que se publicó *todo*. Es la diferencia real entre "verificable" y "sin confianza". El inciso (a) del §7.3 mitiga esto precisamente porque un bloque encontrado no depende de que el servidor publique nada.
 
@@ -293,11 +293,11 @@ Son 32 bytes; el scriptSig del coinbase tiene ~100 y ya se usa una parte (`COINB
 
 **Consecuencia:** como el look se recalcula en vivo (no se guarda), el tipo secundario de cualquier Genesis dual-tipo ya emitido podría mostrarse distinto la próxima vez que se vea. Impacto bajo — la distribución real apenas empieza.
 
-### 8.2 Corrección aplicada 2026-08-20: catálogo muerto en `api/src/data/species.ts`
+### 8.2 Corrección aplicada 2026-08-20: catálogo muerto en `api/src/modules/hashimon/data/species.ts`
 
 Este archivo (servidor, distinto del catálogo del portal) todavía tenía, hardcodeado, la regla exacta que se confirmó falsa: `genesis_electrico: { type: "electrico", archetype: "rodent" }`, además de `genesis_fuego → "canine"`, `genesis_aire → "bird"`, etc. — mirror muerto de un catálogo de cliente (`game/Content/hashimons.js`) que **ya no existe en este repo**.
 
-Verificado que **ningún código lee esos campos** — `emit()` en `api/src/domain/hashimons.ts` solo usa `species.templateId` y la existencia de la clave. Se limpió el archivo a solo `{ templateId }` por especie; el tipo/arquetipo/color de cada Hashimon sigue viniendo exclusivamente del compilador del portal + DNA, nunca de este archivo. Tests (`api/src/core/core.test.ts`) y `tsc --noEmit` verificados sin regresión tras el cambio.
+Verificado que **ningún código lee esos campos** — `emit()` en `api/src/modules/hashimon/domain/hashimons.ts` solo usa `species.templateId` y la existencia de la clave. Se limpió el archivo a solo `{ templateId }` por especie; el tipo/arquetipo/color de cada Hashimon sigue viniendo exclusivamente del compilador del portal + DNA, nunca de este archivo. Tests (`api/src/modules/core/core/core.test.ts`) y `tsc --noEmit` verificados sin regresión tras el cambio.
 
 ---
 
@@ -305,14 +305,14 @@ Verificado que **ningún código lee esos campos** — `emit()` en `api/src/doma
 
 | Archivo | Qué contiene |
 |---|---|
-| [`api/src/core/dna.ts`](../src/core/dna.ts) | Fórmula histórica del ADN (`templateId:birthNonce:speciesKey`), helpers de lectura de nibbles |
-| [`api/src/domain/hashimons.ts`](../src/domain/hashimons.ts) | `emit()` — nacimiento, generación de `birthNonce`, inserción con reintento |
-| [`api/src/data/species.ts`](../src/data/species.ts) | Allowlist de emisión — solo `templateId`, sin tipo/arquetipo (corregido 2026-08-20) |
-| [`api/src/db/schema.sql`](../src/db/schema.sql) | Restricción `UNIQUE` en `dna`, estructura de `players`/`hashimons`/`sessions` |
-| [`api/src/http/auth.ts`](../src/http/auth.ts) | `requireSession` — el único mecanismo de autenticación real |
-| [`api/src/domain/players.ts`](../src/domain/players.ts) | `loginOwner()` (contraseña vía argon2), validación de formato de `publicKey` |
-| [`api/src/core/pow.ts`](../src/core/pow.ts) | `verifyStoredPow`, `verifyJobShare`, `leadingZeroBits` — verificación por recómputo y métrica de suerte usada en §7 |
-| [`api/src/domain/block-template.ts`](../src/domain/block-template.ts) | Conexión al nodo Bitcoin (`getblocktemplate`), coinbase partido alrededor del extranonce — la misma conexión sirve para los datos históricos que necesita §7.1 |
+| [`api/src/modules/core/core/dna.ts`](../src/modules/core/core/dna.ts) | Fórmula histórica del ADN (`templateId:birthNonce:speciesKey`), helpers de lectura de nibbles |
+| [`api/src/modules/hashimon/domain/hashimons.ts`](../src/modules/hashimon/domain/hashimons.ts) | `emit()` — nacimiento, generación de `birthNonce`, inserción con reintento |
+| [`api/src/modules/hashimon/data/species.ts`](../src/modules/hashimon/data/species.ts) | Allowlist de emisión — solo `templateId`, sin tipo/arquetipo (corregido 2026-08-20) |
+| [`api/src/modules/core/db/schema.sql`](../src/modules/core/db/schema.sql) | Restricción `UNIQUE` en `dna`, estructura de `players`/`hashimons`/`sessions` |
+| [`api/src/modules/core/http/auth.ts`](../src/modules/core/http/auth.ts) | `requireSession` — el único mecanismo de autenticación real |
+| [`api/src/modules/player/domain/players.ts`](../src/modules/player/domain/players.ts) | `loginOwner()` (contraseña vía argon2), validación de formato de `publicKey` |
+| [`api/src/modules/core/core/pow.ts`](../src/modules/core/core/pow.ts) | `verifyStoredPow`, `verifyJobShare`, `leadingZeroBits` — verificación por recómputo y métrica de suerte usada en §7 |
+| [`api/src/modules/mining/domain/block-template.ts`](../src/modules/mining/domain/block-template.ts) | Conexión al nodo Bitcoin (`getblocktemplate`), coinbase partido alrededor del extranonce — la misma conexión sirve para los datos históricos que necesita §7.1 |
 | [`3d-world/mods/hashimon_core/media.lua`](../../3d-world/mods/hashimon_core/media.lua) | Registro `hashimon_media/<dna>.glb` — la capa de Exception (§7.4), ya implementada |
 | [`encubation-website/src/lib/compiler.ts`](../../encubation-website/src/lib/compiler.ts) | `compile()` — ADN → look; `TYPES`/`ELEMENT_PALETTES` canónicos |
 | [`encubation-website/src/lib/species.ts`](../../encubation-website/src/lib/species.ts) | Catálogo del portal — 5 especies Genesis, `archetype` sin fijar a propósito |

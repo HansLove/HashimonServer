@@ -256,7 +256,7 @@ cancelled` (the last four terminal). The client runs no state machine of its own
 phase of its UI *is* `status`. `amountUsd` is a number; `amountBtc` stays a decimal
 string, because it is money.
 
-Two guarantees live in SQL rather than in an `if` (`src/db/schema.sql`):
+Two guarantees live in SQL rather than in an `if` (`src/modules/core/db/schema.sql`):
 
 - **one live charge per player** — `payments_active_per_player_idx`, a unique partial
   index over `status IN ('waiting','confirming')`. A second concurrent POST gets `23505`,
@@ -404,7 +404,7 @@ reach us — three exhausted webhook retries is enough — closes `partial` here
 refund is computed from that same count and a lot cannot be complete and owe money back at
 once.
 
-Three guarantees are SQL, not `if`s (`src/db/schema.sql`):
+Three guarantees are SQL, not `if`s (`src/modules/core/db/schema.sql`):
 
 - **one live lot per player** — `caos_lots_active_per_player_idx` over
   `status IN ('queued','assigned','mining')`. This is stricter than the product's
@@ -447,14 +447,14 @@ cannot be reconstructed later.
 
 `GET /incubation/pricing` is public and needs nothing running but the server. Exercising the
 webhook without CaosEngine takes a seeded lot plus the golden vector from
-`src/core/core.test.ts` — the same external vector that pins the header byte order:
+`src/modules/core/core/core.test.ts` — the same external vector that pins the header byte order:
 
 ```bash
 curl -s localhost:4000/incubation/pricing | jq
 # creditsPerShare must be 9.8 for the 10-24 tier, not 10 — it is published net.
 
 # Seed a player, a creature whose DNA the vector's coinbase commits to, and an assigned lot
-# (see the fixtures in src/domain/incubation.test.ts), then deliver one mark:
+# (see the fixtures in src/modules/incubation/domain/incubation.test.ts), then deliver one mark:
 curl -s -X POST localhost:4000/incubation/webhook/<lot_secret> \
   -H 'content-type: application/json' --data-binary @share.json
 # {"received":true,"accepted":true,"duplicate":false} — send it twice: the second is duplicate:true.
@@ -512,10 +512,10 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
 #  "duration_ms":12.4,"db_query_count":2,"db_duration_ms":4.1}
 ```
 
-- **Envelope** (`src/logger.ts`): `service`, `env`, `commit`, `instance`, `core_version`,
+- **Envelope** (`src/modules/core/logger.ts`): `service`, `env`, `commit`, `instance`, `core_version`,
   `algo_version`, `mining_mode` — on every event. `commit` comes from `COMMIT_SHA`, baked
   into the image as a build arg (`docker build --build-arg COMMIT_SHA=$(git rev-parse --short HEAD)`).
-- **Adding a field**: call `enrich({ … })` from `src/http/wide-event.ts` anywhere inside a
+- **Adding a field**: call `enrich({ … })` from `src/modules/core/http/wide-event.ts` anywhere inside a
   request — routes, domain code, the error middleware. It is a no-op outside a request, so
   domain functions stay callable from `migrate.ts` and from tests.
 - **Emitting is not yours to do.** `wideEventMiddleware` is the only caller of `logger.info`
@@ -523,7 +523,7 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
 - **Outside the request cycle** there are three events of their own: `server_start`,
   `shutdown`, and `block_template_fetch` (only on a real RPC round-trip or a failure —
   never on a cache hit, since the fetch is shared across all miners).
-- **Never put a secret in an event.** `redact` in `src/logger.ts` is a belt, not the rule:
+- **Never put a secret in an event.** `redact` in `src/modules/core/logger.ts` is a belt, not the rule:
   identifiers go in prefixed (`dna_prefix`, 8 hex), and `config.btcNodeUrl` — which embeds
   `user:pass@` — is logged only through `safeHost()`.
 - **`X-Request-Id`** is returned on every response, so a client report can be matched to
@@ -539,7 +539,7 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
 - **Not verified:** anything against the real BTCPay instance. No invoice has been created
   or paid end to end — `POST /invoice` has only been exercised against an unreachable
   gateway (correctly → 502 `gateway_error`).
-- Incubation unit + ledger tests (`src/domain/incubation.test.ts`, live Postgres): the four
+- Incubation unit + ledger tests (`src/modules/incubation/domain/incubation.test.ts`, live Postgres): the four
   ladder totals, proportional refunds with the discount carried through, the golden vector
   accepted and a forged hash / swapped merkle branch / wrong creature all rejected, the
   per-player index rejecting a second lot (charging nothing), redelivery not double-counting,

@@ -2,7 +2,7 @@
 
 Paper técnico de referencia: cómo nace un Hashimon, cómo se determina su tipo elemental (fuego, metal, etc.), cómo se construye el prompt de imagen y qué es genético vs ganado por minería.
 
-> ⚠️ **Aviso de obsolescencia (2026-08-20):** este documento describe, en varias secciones, un cliente `game/Content/*.js` que **ya no existe en este repo**, y una lista de **13 tipos elementales** (con Robot/Plasma/Plant como fusiones) que fue reemplazada por el árbol canónico de **16 tipos** (índice hex 0-F). El sistema vigente hoy es `encubation-website/src/lib/compiler.ts` + su puerto Lua, y la fórmula de ADN Genesis cambió (ya no usa `templateId:birthNonce`). Para el estado actual de tipos, arquetipos y fórmula de ADN, usa [`ADN_PROPIEDAD_TEORIA_DE_JUEGO.md`](./ADN_PROPIEDAD_TEORIA_DE_JUEGO.md) como fuente de verdad — este archivo queda como referencia histórica del diseño del compilador y del sistema de prompts, que en buena parte sigue siendo conceptualmente válido.
+> **Aviso de obsolescencia (2026-08-20):** este documento describe, en varias secciones, un cliente `game/Content/*.js` que **ya no existe en este repo**, y una lista de **13 tipos elementales** (con Robot/Plasma/Plant como fusiones) que fue reemplazada por el árbol canónico de **16 tipos** (índice hex 0-F). El sistema vigente hoy es `encubation-website/src/lib/compiler.ts` + su puerto Lua, y la fórmula de ADN Genesis cambió (ya no usa `templateId:birthNonce`). Para el estado actual de tipos, arquetipos y fórmula de ADN, usa [`ADN_PROPIEDAD_TEORIA_DE_JUEGO.md`](./ADN_PROPIEDAD_TEORIA_DE_JUEGO.md) como fuente de verdad — este archivo queda como referencia histórica del diseño del compilador y del sistema de prompts, que en buena parte sigue siendo conceptualmente válido.
 
 **Estado:** documentación del sistema actual  
 **Audiencia:** backend, frontend `game/`, integración 3D Luanti  
@@ -27,7 +27,7 @@ El **prompt de imagen no se guarda en base de datos**. Se **computa on-demand** 
 
 | Modo | Dónde nace | Quién genera `birthNonce` |
 |------|------------|---------------------------|
-| **Online** | `POST /hashimons` → [`api/src/domain/hashimons.ts`](../api/src/domain/hashimons.ts) | Servidor (`randomBytes(8)`) |
+| **Online** | `POST /hashimons` → [`api/src/modules/hashimon/domain/hashimons.ts`](../api/src/modules/hashimon/domain/hashimons.ts) | Servidor (`randomBytes(8)`) |
 | **Offline** | `HashimonSystem.createInstance()` → [`game/Content/hashimonSystem.js`](../game/Content/hashimonSystem.js) | Cliente (encuentros) o catálogo |
 | **3D Luanti** | Sync roster vía `hashimon_core` HTTP | Servidor (misma fila PostgreSQL) |
 
@@ -79,12 +79,12 @@ flowchart LR
 El cliente **solicita** una especie; el servidor **decide** la identidad individual.
 
 1. Cliente: `POST /hashimons` con `{ speciesKey, provenance?, name? }` ([`game/Content/hashimonApi.js`](../game/Content/hashimonApi.js) → `emitHashimon()`).
-2. Servidor: `emit()` valida la especie en [`api/src/data/species.ts`](../api/src/data/species.ts).
+2. Servidor: `emit()` valida la especie en [`api/src/modules/hashimon/data/species.ts`](../api/src/modules/hashimon/data/species.ts).
 3. Genera `birthNonce = randomBytes(8).toString("hex")`.
 4. Deriva `dna = Dna.derive(templateId, birthNonce, speciesKey)`.
 5. Inserta fila en `hashimons`; `dna` es **UNIQUE** (reintenta si colisión).
 
-```101:117:api/src/domain/hashimons.ts
+```101:117:api/src/modules/hashimon/domain/hashimons.ts
 export async function emit(input: {
   ownerId: string;
   speciesKey: string;
@@ -118,7 +118,7 @@ export async function emit(input: {
 
 ### 2.3 Esquema PostgreSQL — solo identidad + PoW
 
-[`api/src/db/schema.sql`](../api/src/db/schema.sql):
+[`api/src/modules/core/db/schema.sql`](../api/src/modules/core/db/schema.sql):
 
 | Columna | Rol |
 |---------|-----|
@@ -135,7 +135,7 @@ export async function emit(input: {
 
 ### 2.4 Vista API `present()`
 
-[`present()`](../api/src/domain/hashimons.ts) devuelve identidad + progresión derivada + bloque `pow` + `verified` (recomputación del share almacenado).
+[`present()`](../api/src/modules/hashimon/domain/hashimons.ts) devuelve identidad + progresión derivada + bloque `pow` + `verified` (recomputación del share almacenado).
 
 ---
 
@@ -150,7 +150,7 @@ ADN = SHA-256( templateId : birthNonce : speciesKey )  →  64 caracteres hex mi
 Implementación idéntica en cliente y servidor:
 
 - Cliente: [`game/Content/hashimonDNA.js`](../game/Content/hashimonDNA.js) — `derive()`
-- Servidor: [`api/src/core/dna.ts`](../api/src/core/dna.ts) — `Dna.derive()`
+- Servidor: [`api/src/modules/core/core/dna.ts`](../api/src/modules/core/core/dna.ts) — `Dna.derive()`
 
 Los nibbles se indexan desde **1** (convención white paper): `[1]` = primer dígito hex, `[64]` = último.
 
@@ -208,7 +208,7 @@ Detalle ampliado para jugadores: [HASHIMON_ADN_Y_EVOLUCION.md §3](./HASHIMON_AD
 | Ubicación | Contenido |
 |-----------|-----------|
 | [`game/Content/hashimons.js`](../game/Content/hashimons.js) | Catálogo completo: sprites, moves, `spriteStages` |
-| [`api/src/data/species.ts`](../api/src/data/species.ts) | Subset emisionable por servidor |
+| [`api/src/modules/hashimon/data/species.ts`](../api/src/modules/hashimon/data/species.ts) | Subset emisionable por servidor |
 | [`3d-world/mods/hashimon_entities/species.json`](../3d-world/mods/hashimon_entities/species.json) | Export 3D vía `scripts/export-species-for-voxel.cjs` |
 
 ### 4.1 Ejemplos concretos
@@ -449,7 +449,7 @@ Sync: `hashimon_core` HTTP → roster del jugador → spawn en grid alrededor de
 
 ### 10.1 Genesis elemental (servidor)
 
-Cinco starters en [`api/src/data/species.ts`](../api/src/data/species.ts):
+Cinco starters en [`api/src/modules/hashimon/data/species.ts`](../api/src/modules/hashimon/data/species.ts):
 
 | speciesKey | Tipo | templateId |
 |------------|------|------------|
@@ -514,9 +514,9 @@ Cinco starters en [`api/src/data/species.ts`](../api/src/data/species.ts):
 | `game/Content/hashimonPrompt.js` | Prompt + value sheet |
 | `game/Content/hashimons.js` | Catálogo cliente |
 | `game/Content/hashimonSystem.js` | Instancias, scaling, tier |
-| `api/src/domain/hashimons.ts` | Emisión servidor |
-| `api/src/data/species.ts` | Catálogo emisionable |
-| `api/src/core/pow.ts` | Verificación shares |
+| `api/src/modules/hashimon/domain/hashimons.ts` | Emisión servidor |
+| `api/src/modules/hashimon/data/species.ts` | Catálogo emisionable |
+| `api/src/modules/core/core/pow.ts` | Verificación shares |
 
 ---
 
