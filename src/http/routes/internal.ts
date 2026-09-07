@@ -20,6 +20,7 @@ import {
   type TownClaimInput,
 } from "@/domain/territory";
 import { listActiveAlliancePairs } from "@/domain/diplomacy";
+import { replaceVibingTowers, type VibingTowerInput } from "@/domain/vibing";
 import {
   ALEN_VERBS,
   listPendingOrders,
@@ -27,11 +28,21 @@ import {
   resolveOrder,
   saveState as saveAlenState,
 } from "@/domain/alen";
+import { planOnce, scorePlan } from "@/domain/alen-planner";
+import { replyTo } from "@/domain/alen-chat";
 import { MAP_TILE_SIZE, saveMapTile } from "@/domain/map-tiles";
 import {
   arriveForLuantiUsername,
   markersForLuantiUsername,
 } from "@/domain/map-markers";
+import {
+  applyWorldDeltas,
+  rosterForTown,
+  seedGenesis,
+  townSituation,
+  type WorldDelta,
+} from "@/domain/wolkers";
+import { councilFor } from "@/domain/wolker-council";
 
 export const internalRouter = Router();
 
@@ -238,6 +249,46 @@ internalRouter.get(
   })
 );
 
+const towersSchema = z.object({
+  // Luanti's write_json emits null for empty tables (not []); treat that as
+  // replace-all with zero towers so a world with none planted still syncs cleanly.
+  towers: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(64),
+        town: z.string().max(64).nullable().optional(),
+        owner: z.string().max(64).nullable().optional(),
+        x: coord,
+        y: coord,
+        z: coord,
+      })
+    )
+    .max(10_000)
+    .nullable()
+    .transform((v) => v ?? []),
+});
+
+/** The Luanti world pushes the WHOLE set of Vibing towers here (replace-all) so the web
+ *  map can draw them. A projection — the world owns where a tower physically is. */
+internalRouter.post(
+  "/internal/luanti-vibing-towers",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { towers } = towersSchema.parse(req.body ?? {});
+    const input: VibingTowerInput[] = towers.map((t) => ({
+      id: t.id,
+      townName: t.town ?? null,
+      owner: t.owner ?? null,
+      x: t.x,
+      y: t.y,
+      z: t.z,
+    }));
+    const count = await replaceVibingTowers(input);
+    enrich({ vibing_result: "ok", tower_count: count });
+    res.json({ ok: true, towerCount: count });
+  })
+);
+
 const mapTileSchema = z.object({
   tileX: z.number().int(),
   tileZ: z.number().int(),
@@ -318,7 +369,10 @@ const alenStateSchema = z.object({
   mood: z.string().max(40).optional(),
   observed: z.boolean(),
   digest: z.record(z.unknown()).optional(),
-  events: z.array(alenEventSchema).max(20).optional(),
+  // Ídem: `events` está vacío la mayor parte del tiempo y llegaba como {},
+  // rechazando el informe completo — con lo que `observed` nunca se actualizaba
+  // y el planificador quedaba bloqueado por su propia compuerta.
+  events: z.array(alenEventSchema).max(20).optional().catch(undefined),
 });
 
 /** El mundo sube su informe: proyección de estado más las novedades ocurridas.
@@ -341,6 +395,12 @@ internalRouter.post(
     });
     for (const ev of body.events ?? []) {
       await recordEvent({ kind: ev.kind, actor: ev.actor, payload: ev.payload });
+      // Un plan que terminó puntúa la habilidad que lo produjo. `origen` es el id
+      // de la orden, que el mundo arrastra dentro del plan justo para esto.
+      const origen = (ev.payload as { origen?: unknown } | undefined)?.origen;
+      if (typeof origen === "number" && (ev.kind === "plan_completo" || ev.kind === "plan_fallido")) {
+        await scorePlan(origen, ev.kind === "plan_completo" ? "win" : "loss");
+      }
     }
     enrich({
       alen_alive: body.alive,
@@ -349,6 +409,26 @@ internalRouter.post(
       alen_event_count: (body.events ?? []).length,
     });
     res.json({ ok: true, verbs: ALEN_VERBS });
+
+    // El planificador corre DESPUÉS de responder: el mundo no espera al modelo,
+    // y recogerá la orden en su siguiente poll. La compuerta de gasto decide si
+    // llega a haber llamada — casi siempre no la hay, y eso es lo que se busca.
+    // Cualquier fallo acaba como evento `planner_error`, nunca rompiendo el
+    // informe del mundo.
+    void planOnce().then(
+      (r) => {
+        if (r.planned) {
+          void recordEvent({
+            kind: "planner_ok",
+            payload: {
+              orden: r.orderId, nombre: r.name, modelo: r.model,
+              tokens_in: r.inTokens, tokens_out: r.outTokens, cache_read: r.cacheRead,
+            },
+          });
+        }
+      },
+      (err) => void recordEvent({ kind: "planner_error", payload: { error: String(err).slice(0, 200) } })
+    );
   })
 );
 
@@ -401,5 +481,145 @@ internalRouter.post(
       marker_id: body.markerId,
     });
     res.json(result);
+  })
+);
+
+
+const alenChatSchema = z.object({
+  player: z.string().min(1).max(40),
+  message: z.string().min(1).max(400),
+  distance: z.number().optional(),
+  // .catch(undefined): una tabla Lua vacía llega como {} y no como [], y sin esto
+  // un array vacío tira la petición entera. El mundo ya los omite, pero la trampa
+  // es permanente y un campo opcional no merece derribar el mensaje.
+  history: z.array(z.object({ role: z.string().max(10), text: z.string().max(300) }))
+    .max(12).optional().catch(undefined),
+  exchangesLeft: z.number().optional(),
+  mood: z.string().max(40).optional(),
+  anger: z.number().optional(),
+  hp: z.number().optional(),
+  maxHp: z.number().optional(),
+  relation: z
+    .object({
+      label: z.string().max(20).optional(),
+      grudge: z.number().optional(),
+      respect: z.number().optional(),
+      sentiment: z.number().optional(),
+      interest: z.number().optional(),
+      timesSeen: z.number().optional(),
+      lastEvent: z.string().max(40).optional(),
+    })
+    .optional(),
+});
+
+/** Alguien le habló a Alen estando cerca. A diferencia de las órdenes, esta ruta
+ *  responde SÍNCRONA: una conversación con dos minutos de latencia no es una
+ *  conversación. El mundo ya filtró lo formulaico con su banco de frases, así que
+ *  lo que llega aquí es lo que merece una respuesta de verdad. */
+internalRouter.post(
+  "/internal/luanti-alen-chat",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const body = alenChatSchema.parse(req.body ?? {});
+    const result = await replyTo(body);
+    enrich({
+      alen_chat_player: body.player,
+      alen_chat_replied: result.replied,
+      alen_chat_why: result.replied ? null : result.why,
+      ...(result.replied
+        ? { alen_chat_in: result.inTokens, alen_chat_out: result.outTokens,
+            alen_chat_cache: result.cacheRead }
+        : {}),
+    });
+    if (!result.replied) {
+      res.json({ replied: false, why: result.why });
+      return;
+    }
+    // El veredicto viaja con la frase: el mundo aplica ego, interés y respeto al
+    // estado de Alen, y `intent` puede acabar en un ataque.
+    res.json({ replied: true, reply: result.reply, appraisal: result.appraisal });
+  })
+);
+
+
+// --- Wolkers (docs/WOLKERS_V1.md, Fase 1) --------------------------------------------
+// El mundo encarna al padrón; no lo escribe. Estas tres rutas son toda la superficie que
+// Luanti necesita: a quién dar cuerpo, qué le pasó a ese cuerpo, y qué postura tomar.
+
+/** El padrón vivo de un town, con modelo y signo ya resueltos por el servidor: el mundo
+ *  no elige apariencia, sólo carga la pieza que le dicen. */
+internalRouter.get(
+  "/internal/luanti-wolkers",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const town = typeof req.query.town === "string" ? req.query.town : "";
+    if (town === "") throw new AppError(400, "town_required", "falta el parámetro town");
+    const roster = await rosterForTown(town);
+    enrich({ town_name: town, wolker_count: roster.length });
+    res.json({ town, wolkers: roster });
+  })
+);
+
+const wolkerGenesisSchema = z.object({
+  town: z.string().min(1).max(64),
+  home: z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() }),
+});
+
+/** Al fundarse un town, el mundo pide su camada genesis. Idempotente por homeblock, así que
+ *  el mod puede reintentar sin miedo: una segunda llamada devuelve `granted: []`. */
+internalRouter.post(
+  "/internal/luanti-wolkers-genesis",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { town, home } = wolkerGenesisSchema.parse(req.body ?? {});
+    const granted = await seedGenesis(town, home);
+    enrich({ town_name: town, genesis_granted: granted.length });
+    res.json({ ok: true, granted });
+  })
+);
+
+const wolkerDeltaSchema = z.object({
+  deltas: z
+    .array(
+      z.object({
+        id: z.string().length(64),
+        pos: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional(),
+        // Sólo las muertes que ocurren en el mundo. El hambre y la vejez las firma el censo.
+        died: z.enum(["combat", "raid"]).optional(),
+      })
+    )
+    .max(500),
+});
+
+/** Lo único que el mundo sabe y el censo no: dónde acabó cada cuerpo y quién cayó peleando. */
+internalRouter.post(
+  "/internal/luanti-wolkers-sync",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { deltas } = wolkerDeltaSchema.parse(req.body ?? {});
+    const result = await applyWorldDeltas(deltas as WorldDelta[]);
+    enrich({ wolker_moved: result.moved, wolker_deaths: result.deaths, wolker_ignored: result.ignored });
+    res.json({ ok: true, ...result });
+  })
+);
+
+const councilSchema = z.object({
+  town: z.string().min(1).max(64),
+  hostiles: z.number().int().min(0).max(64).optional(),
+  damage: z.number().int().min(0).max(10_000).optional(),
+});
+
+/** El consejo: una postura para el pueblo entero. Responde siempre — con modelo si la
+ *  situación lo merece y hay presupuesto, y con la regla determinista en cualquier otro
+ *  caso. El mundo no distingue: aplica `posture` y respeta `ttlS`. */
+internalRouter.post(
+  "/internal/luanti-wolkers-council",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { town, hostiles, damage } = councilSchema.parse(req.body ?? {});
+    const situation = await townSituation(town);
+    const decision = await councilFor(situation, { hostiles, damage });
+    enrich({ town_name: town, council_posture: decision.posture, council_source: decision.source });
+    res.json({ ...decision, situation });
   })
 );

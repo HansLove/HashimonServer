@@ -119,6 +119,66 @@ CREATE TABLE IF NOT EXISTS town_alliances (
 );
 CREATE INDEX IF NOT EXISTS town_alliances_active_idx ON town_alliances(status) WHERE status = 'active';
 
+-- Vibing towers (VIBING_V1.md §3): in-world structures a town plants to tap the yield of
+-- their coordinate. A projection pushed whole from the Luanti world (like town_claims) —
+-- the world owns where a tower physically is; this table only mirrors them so the website
+-- can show them on the map with the tier each one taps (the tier itself the web derives
+-- from the coord via the same zona(x,z) function). Keyed by node position.
+CREATE TABLE IF NOT EXISTS vibing_towers (
+  id         text PRIMARY KEY,        -- "x:y:z" world-node position
+  town_name  text,
+  owner      text,
+  x          integer NOT NULL,
+  y          integer NOT NULL,
+  z          integer NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS vibing_towers_town_idx ON vibing_towers(town_name);
+
+-- PoW YIELD (docs/POW_YIELD_V1.md): the second harvest over the same mining work. A hash
+-- whose DISJOINT yield window clears a threshold drops a material. `hash` PK is the
+-- anti-replay guard (same pattern as submitted_shares) — the server recomputes the hash
+-- and re-derives tier/material_key, so those columns are convenience, never authority.
+-- `job_id` is SET NULL (not CASCADE) on job cleanup: a harvested material must outlive the
+-- ephemeral mining_jobs row it came from. `place` is where it materialized (feeds heat, later).
+CREATE TABLE IF NOT EXISTS pow_yield (
+  hash         text PRIMARY KEY,
+  hashimon_id  uuid NOT NULL REFERENCES hashimons(id) ON DELETE CASCADE,
+  owner_id     uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  job_id       uuid REFERENCES mining_jobs(id) ON DELETE SET NULL,
+  yield_bits   integer NOT NULL,
+  tier         text NOT NULL CONSTRAINT pow_yield_tier CHECK (tier IN ('consumable', 'durable', 'capital')),
+  material_key text NOT NULL,
+  extranonce2  bigint NOT NULL,
+  nonce        bigint NOT NULL,
+  place        text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  -- Hashi-croqueta inventory: a consumable yield is edible until consumed_at is set
+  -- (docs/VIBING_V1.md §5). Durable/capital are materials, never spent here.
+  consumed_at  timestamptz
+);
+ALTER TABLE pow_yield ADD COLUMN IF NOT EXISTS consumed_at timestamptz;
+CREATE INDEX IF NOT EXISTS pow_yield_hashimon_idx ON pow_yield(hashimon_id);
+CREATE INDEX IF NOT EXISTS pow_yield_owner_idx ON pow_yield(owner_id);
+-- Unspent croquetas: the Alimentar button's stock check and FIFO consume.
+CREATE INDEX IF NOT EXISTS pow_yield_croqueta_idx
+  ON pow_yield(hashimon_id, created_at)
+  WHERE tier = 'consumable' AND consumed_at IS NULL;
+
+-- HEAT (docs/POW_YIELD_V1.md §3.2): the aggregate of verified harvests that materialized at
+-- a place — a Vibing tower ("x:y:z") or a player's vault ("vault:<player_id>"). Heat is the
+-- honest, server-computed activity of a coordinate: every accepted yield bumps its place by 1.
+-- The spatial link the game reads back — a hot tower is a proven, worth-raiding one — so this
+-- is a projection FROM verified work, never a client claim. town_name is denormalized for the
+-- map to aggregate heat per town cheaply.
+CREATE TABLE IF NOT EXISTS place_heat (
+  place       text PRIMARY KEY,
+  town_name   text,
+  heat        bigint NOT NULL DEFAULT 0,
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS place_heat_town_idx ON place_heat(town_name);
+
 -- Bearer session tokens. Thin on purpose; swap for a real auth provider before
 -- production (see README — do not grow this into a home-made auth system).
 CREATE TABLE IF NOT EXISTS sessions (
@@ -602,3 +662,90 @@ CREATE INDEX IF NOT EXISTS map_markers_town_active_idx
   ON map_markers (town_name, status) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS map_markers_hashimon_active_idx
   ON map_markers (hashimon_id, status) WHERE status = 'active';
+
+-- La biblioteca de habilidades de Alen, y a la vez el libro de gastos.
+--
+-- Es la pieza de Voyager que aquí hay que rehacer: la biblioteca original guarda
+-- CÓDIGO ejecutable que el modelo escribe, y eso aquí sería ejecución remota
+-- sobre el servidor de juego. Una habilidad nuestra es un plan de verbos de la
+-- lista blanca, con nombre y con historial. Se pierde generalidad; se gana que
+-- nada de lo que el modelo escribe pueda correr como código.
+--
+-- `wins`/`losses` vienen del mundo: `plan_completo` y `plan_fallido` con el id de
+-- la orden que lo originó. Los planes con mejor historial se le devuelven al
+-- modelo como ejemplos, y ese bucle es todo el aprendizaje que hay.
+CREATE TABLE IF NOT EXISTS alen_plans (
+  id            bigserial PRIMARY KEY,
+  name          text NOT NULL,
+  plan          jsonb NOT NULL,
+  situation     text,             -- resumen de por qué se generó, para el ejemplo
+  order_id      bigint REFERENCES alen_orders(id) ON DELETE SET NULL,
+  wins          integer NOT NULL DEFAULT 0,
+  losses        integer NOT NULL DEFAULT 0,
+  -- Contabilidad de la llamada que lo produjo. cache_read_tokens es el número que
+  -- dice si el ahorro está ocurriendo: si sale 0 una y otra vez, algo volátil se
+  -- coló en el prefijo cacheado.
+  model             text,
+  input_tokens      integer NOT NULL DEFAULT 0,
+  output_tokens     integer NOT NULL DEFAULT 0,
+  cache_read_tokens integer NOT NULL DEFAULT 0,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS alen_plans_best_idx ON alen_plans ((wins - losses) DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS alen_plans_order_idx ON alen_plans (order_id) WHERE order_id IS NOT NULL;
+
+-- Wolkers: la población nativa de un town (docs/WOLKERS_V1.md). El censo vive aquí, no en
+-- Luanti: el mundo simula sólo las entidades cercanas a jugadores, pero el hambre, las
+-- muertes y las migraciones corren en SQL aunque el servidor esté vacío. Un town abandonado
+-- sigue pasando hambre. `id` es SHA256("wolker:v1:"||padre_a||":"||padre_b||":"||nonce), así
+-- que el linaje entero es reproducible desde el genesis del town — nada aquí es arbitrario.
+CREATE TABLE IF NOT EXISTS wolkers (
+  id            char(64) PRIMARY KEY,
+  -- El town es la única pertenencia: los wolkers son soulbound al town, nunca a un jugador,
+  -- y por eso no hay owner_id. Si el town desaparece quedan sin patria (NULL), no muertos.
+  town_name     text REFERENCES town_claims(town_name) ON DELETE SET NULL,
+  parent_a      char(64) NOT NULL,
+  parent_b      char(64) NOT NULL,
+  birth_nonce   bigint   NOT NULL,
+  -- Derivados del id (bytes fijos), guardados porque se leen en cada tick; recomputables.
+  vigor         smallint NOT NULL,
+  oficio        smallint NOT NULL,
+  temple        smallint NOT NULL,
+  hunger        smallint NOT NULL DEFAULT 0,   -- 0 saciado .. 100 inanición
+  morale        smallint NOT NULL DEFAULT 50,  -- 0 huye .. 100 leal
+  state         text NOT NULL DEFAULT 'alive'
+                CONSTRAINT wolkers_state CHECK (state IN ('alive', 'migrating', 'dead')),
+  born_at       timestamptz NOT NULL DEFAULT now(),
+  died_at       timestamptz,
+  death_cause   text CONSTRAINT wolkers_death_cause
+                CHECK (death_cause IS NULL OR death_cause IN ('hunger', 'combat', 'raid', 'age')),
+  home_x        integer,
+  home_y        integer,
+  home_z        integer,
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS wolkers_town_alive_idx ON wolkers (town_name) WHERE state <> 'dead';
+
+-- El historial es la mitad del juego: "perdiste 40 wolkers y 31 se fueron a Nueva Roca" sólo
+-- existe si hay filas aquí. Append-only, como audit_log.
+CREATE TABLE IF NOT EXISTS wolker_events (
+  id         bigserial PRIMARY KEY,
+  wolker_id  char(64) NOT NULL REFERENCES wolkers(id) ON DELETE CASCADE,
+  kind       text NOT NULL CONSTRAINT wolker_events_kind
+             CHECK (kind IN ('birth', 'fed', 'starving', 'emigrate', 'immigrate', 'death', 'conscript')),
+  from_town  text,
+  to_town    text,
+  detail     jsonb NOT NULL DEFAULT '{}'::jsonb,
+  at         timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS wolker_events_wolker_idx ON wolker_events (wolker_id, at DESC);
+CREATE INDEX IF NOT EXISTS wolker_events_recent_idx ON wolker_events (at DESC);
+
+-- Un reparto genesis por town y para siempre: refundar el town con el mismo homeblock no
+-- vuelve a repartir. La clave es el town_seed (derivado del homeblock), no el nombre.
+CREATE TABLE IF NOT EXISTS wolker_genesis (
+  town_seed  char(64) PRIMARY KEY,
+  town_name  text NOT NULL,
+  count      integer NOT NULL,
+  at         timestamptz NOT NULL DEFAULT now()
+);

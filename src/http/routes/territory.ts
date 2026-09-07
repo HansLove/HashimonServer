@@ -18,6 +18,7 @@ import {
   presentDiplomacy,
   resolveTownName,
 } from "@/domain/diplomacy";
+import { listVibingTowers, presentVibingTowers, heatByPlace } from "@/domain/vibing";
 import { requireSession } from "@/http/auth";
 import { AppError, asyncHandler } from "@/http/errors";
 import { enrich } from "@/http/wide-event";
@@ -78,6 +79,19 @@ territoryRouter.get(
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.send(png);
+  })
+);
+
+// GET /territory/vibing-towers — public: every Vibing tower in the world (world node
+// coords), each with the tier its coordinate yields (zona(x,z)) and its accumulated heat
+// (verified harvests that materialized there). A hot tower is a proven, worth-raiding one.
+territoryRouter.get(
+  "/territory/vibing-towers",
+  asyncHandler(async (_req, res) => {
+    const rows = await listVibingTowers();
+    const heat = await heatByPlace(rows.map((r) => r.id));
+    enrich({ tower_count: rows.length });
+    res.json({ towers: presentVibingTowers(rows.map((r) => ({ ...r, heat: heat.get(r.id) ?? 0 }))) });
   })
 );
 

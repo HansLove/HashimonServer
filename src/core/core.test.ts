@@ -19,6 +19,7 @@ import {
   hashBitcoinJob,
   stratumPrevHashToBE,
   reverseHex,
+  evaluateYield,
   type PowRecord,
   type MiningJobRecord,
   type BitcoinShareSnapshot,
@@ -448,4 +449,22 @@ test("a genesis species key round-trips to its spirit and element", () => {
     assert.equal(key, `g2_${s.key}_electrico`);
     assert.ok(Hashimons[key], `${key} is not in the emission allowlist`);
   }
+});
+
+// PoW yield windows (docs/POW_YIELD_V1) — crafted hashes with a known yield window
+// hex[16..32] and material window hex[32..48]. Golden vectors pin the disjoint split.
+test("evaluateYield reads the disjoint yield + material windows", () => {
+  const mk = (win: string, mat = "abcdef0123456789") =>
+    "ffffffffffffffff" + win + mat + "0000000000000000"; // prefix(16)+win(16)+mat(16)+tail(16)
+  assert.equal(evaluateYield(mk("0000080000000000")).yieldBits, 20);
+  assert.equal(evaluateYield(mk("0000080000000000")).tier, "consumable"); // floor
+  assert.equal(evaluateYield(mk("0000002000000000")).yieldBits, 26);
+  assert.equal(evaluateYield(mk("0000002000000000")).tier, "consumable");
+  assert.equal(evaluateYield(mk("0000000200000000")).tier, "durable"); // 30 bits
+  assert.equal(evaluateYield(mk("0000000020000000")).tier, "capital"); // 34 bits
+  assert.equal(evaluateYield(mk("0000100000000000")).tier, null); // 19 bits, below floor
+  assert.equal(evaluateYield(mk("f000000000000000")).tier, null); // 0 bits
+  assert.equal(evaluateYield(mk("0000002000000000")).materialKey, "abcdef0123456789");
+  // progression window (hex[0..]) is disjoint — all-f prefix must not affect the yield read.
+  assert.equal(evaluateYield("0".repeat(16) + "0000002000000000" + "0".repeat(32)).tier, "consumable");
 });

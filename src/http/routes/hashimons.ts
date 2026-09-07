@@ -5,7 +5,7 @@ import { AppError, asyncHandler } from "@/http/errors";
 import { enrich } from "@/http/wide-event";
 import { canOwn } from "@/domain/players";
 import { emit, getForOwner, listByOwner, present, isGenesisSpecies } from "@/domain/hashimons";
-import { issueJob, jobResponse, submitShare } from "@/domain/mining";
+import { issueJob, jobResponse, submitShare, submitYield, yieldSummary } from "@/domain/mining";
 import { Hashimons } from "@/data/species";
 
 export const hashimonsRouter = Router();
@@ -139,5 +139,54 @@ hashimonsRouter.post(
       },
       hashimon: presented,
     });
+  })
+);
+
+const yieldSchema = z.object({
+  jobId: z.string().uuid(),
+  extranonce2: z.number().int().min(0).max(0xffffffff),
+  nonce: z.number().int().min(0).max(0xffffffff),
+});
+
+// POST /hashimons/:id/yield — the SECOND harvest (docs/POW_YIELD_V1). Same body as a
+// share, but the floor is the yield window, not the share target — most yield hashes are
+// below the share threshold. The server recomputes and re-derives the drop.
+hashimonsRouter.post(
+  "/hashimons/:id/yield",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const row = await getForOwner(req.params.id!, req.player!.id);
+    if (!row) { throw new AppError(404, "not found", "not_found"); }
+
+    const body = yieldSchema.parse(req.body ?? {});
+    enrich({ hashimon_id: row.id, job_id: body.jobId });
+    const outcome = await submitYield(row, body);
+
+    if (!outcome.ok) {
+      const err = outcome.error;
+      if (err === "stale_job" || err === "duplicate_yield") { throw new AppError(409, err, err); }
+      if (err === "dna_mismatch") { throw new AppError(400, err, err); }
+      // no_yield / invalid_nonce: the hash simply cleared no threshold.
+      throw new AppError(422, err, err);
+    }
+
+    res.json({
+      harvested: true,
+      tier: outcome.tier,
+      materialKey: outcome.materialKey,
+      yieldBits: outcome.yieldBits,
+      hash: outcome.hash,
+    });
+  })
+);
+
+// GET /hashimons/:id/yield — what this creature has harvested so far, per tier.
+hashimonsRouter.get(
+  "/hashimons/:id/yield",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const row = await getForOwner(req.params.id!, req.player!.id);
+    if (!row) { throw new AppError(404, "not found", "not_found"); }
+    res.json(await yieldSummary(row.id));
   })
 );

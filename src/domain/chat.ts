@@ -9,6 +9,8 @@ import {
   buildSystemPrompt, memoryPrompt, temperamentOf, wellbeingOf,
   MEMORY_PROFILE, type CareKind, type CompanionRow, type Wellbeing,
 } from "@/domain/companion";
+import { consumeCroqueta, croquetaBalance } from "@/domain/mining";
+import { AppError } from "@/http/errors";
 import type { SpiritKey } from "@/core/birth-identity";
 
 //Cuántos turnos anteriores se le pasan al modelo. Corto a propósito: la
@@ -28,6 +30,13 @@ export type ChatState = {
   turnsUsed: number;
   freeTurnsLeft: number;
   credits: number;
+  /** Unspent Hashi-croquetas (consumable PoW yields). */
+  croquetas: number;
+};
+
+export type CareResult = {
+  wellbeing: Wellbeing;
+  croquetas: number;
 };
 
 async function ensureState(hashimonId: string): Promise<CompanionRow> {
@@ -54,6 +63,7 @@ export async function loadState(hashimonId: string, ownerId: string): Promise<Ch
     `SELECT credits::text AS credits FROM players WHERE id = $1`, [ownerId]
   );
   const turnsUsed = Number(used.rows[0]?.n ?? 0);
+  const croquetas = await croquetaBalance(hashimonId);
   return {
     wellbeing: wellbeingOf(row),
     //De más viejo a más reciente: así el prompt los lee como se acumularon.
@@ -61,6 +71,7 @@ export async function loadState(hashimonId: string, ownerId: string): Promise<Ch
     turnsUsed,
     freeTurnsLeft: Math.max(0, config.chatFreeTurns - turnsUsed),
     credits: Number(player.rows[0]?.credits ?? 0),
+    croquetas,
   };
 }
 
@@ -179,9 +190,31 @@ export async function speak(input: SpeakInput): Promise<{
 
 //Atender un cuidado concreto. Es lo que cierra el bucle: la criatura pide, el
 //jugador hace algo en el mundo, y el cuidado sube.
-export async function care(hashimonId: string, kind: CareKind, sector?: string): Promise<Wellbeing> {
+//Hunger costs one Hashi-croqueta (unspent consumable yield); other cares are free.
+export async function care(hashimonId: string, kind: CareKind, sector?: string): Promise<CareResult> {
   const column = { hunger: "fed_at", company: "talked_at", exercise: "mined_at", world: "world_at" }[kind];
   await ensureState(hashimonId);
+
+  if (kind === "hunger") {
+    return withTransaction(async (client: DbClient) => {
+      const spent = await consumeCroqueta(hashimonId, client);
+      if (!spent) {
+        throw new AppError(409, "no croquetas — incubate to harvest food", "no_food");
+      }
+      const r = await query<CompanionRow>(
+        `UPDATE companion_state
+            SET fed_at = now(), updated_at = now(),
+                last_sector = COALESCE($2, last_sector)
+          WHERE hashimon_id = $1
+          RETURNING fed_at, talked_at, mined_at, world_at, last_sector`,
+        [hashimonId, sector ?? null],
+        client
+      );
+      const croquetas = await croquetaBalance(hashimonId, client);
+      return { wellbeing: wellbeingOf(r.rows[0]!), croquetas };
+    });
+  }
+
   const r = await query<CompanionRow>(
     `UPDATE companion_state
         SET ${column} = now(), updated_at = now(),
@@ -190,5 +223,6 @@ export async function care(hashimonId: string, kind: CareKind, sector?: string):
       RETURNING fed_at, talked_at, mined_at, world_at, last_sector`,
     [hashimonId, sector ?? null]
   );
-  return wellbeingOf(r.rows[0]!);
+  const croquetas = await croquetaBalance(hashimonId);
+  return { wellbeing: wellbeingOf(r.rows[0]!), croquetas };
 }

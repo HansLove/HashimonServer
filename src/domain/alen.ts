@@ -19,6 +19,9 @@ export const ALEN_VERBS = [
   "blockjump",
   "wait",
   "say",
+  // El ataque mayor. El mundo rechaza el plan entero con `insufficient_energy`
+  // si no hay recurso, y ese motivo vuelve al planificador en el ack.
+  "firecube",
 ] as const;
 
 export type AlenVerb = (typeof ALEN_VERBS)[number];

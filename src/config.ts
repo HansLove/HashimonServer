@@ -48,6 +48,24 @@ export const config = {
   // Find it in Claude Console → Settings → Workspaces (wrkspc_…).
   anthropicWorkspaceId: process.env.ANTHROPIC_WORKSPACE_ID ?? "",
   anthropicModel: process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5",
+  //El planificador de Alen tiene su propio modelo: decide campañas, no charla
+  //con una mascota. claude-haiku-4-5 es la opción barata si el gasto aprieta —
+  //un cambio de variable, sin tocar código.
+  alenPlannerModel: process.env.ALEN_PLANNER_MODEL ?? "claude-opus-5",
+  //Las dos válvulas de gasto del planificador. Se comprueban ANTES de construir
+  //la petición, así que un tope alcanzado no cuesta ni un token.
+  alenPlanMinIntervalS: Number(process.env.ALEN_PLAN_MIN_INTERVAL_S ?? 180),
+  alenPlanMaxPerDay: Number(process.env.ALEN_PLAN_MAX_PER_DAY ?? 60),
+  //Conversar y decidir campañas son presupuestos distintos: hablar es barato y
+  //frecuente, planificar es caro y raro.
+  alenChatMaxPerDay: Number(process.env.ALEN_CHAT_MAX_PER_DAY ?? 150),
+  //El consejo de los wolkers: barato y raro por diseño. La FSM del mundo decide sola
+  //el 99 % del tiempo; el modelo sólo entra cuando el town está en una situación que
+  //una regla no sabe leer, y estas dos válvulas se comprueban ANTES de construir la
+  //petición, así que un tope alcanzado no cuesta un token.
+  wolkerCouncilModel: process.env.WOLKER_COUNCIL_MODEL ?? "claude-haiku-4-5",
+  wolkerCouncilMinIntervalS: Number(process.env.WOLKER_COUNCIL_MIN_INTERVAL_S ?? 300),
+  wolkerCouncilMaxPerDay: Number(process.env.WOLKER_COUNCIL_MAX_PER_DAY ?? 40),
   //Turnos gratis por criatura antes de empezar a cobrar créditos.
   chatFreeTurns: Number(process.env.CHAT_FREE_TURNS ?? 20),
   //Créditos por turno una vez agotado el cupo.

@@ -37,6 +37,7 @@ chatRouter.get(
       keepsakes: state.keepsakes,
       freeTurnsLeft: state.freeTurnsLeft,
       credits: state.credits,
+      croquetas: state.croquetas,
       provider: anthropicConfigured() ? "ready" : "unconfigured",
       worldQuest,
     });
@@ -91,8 +92,8 @@ chatRouter.post(
     const { kind, sector } = careBody.parse(req.body);
     const row = await getForOwner(req.params.id!, req.player!.id);
     if (!row) throw new AppError(404, "not found", "not_found");
-    const wellbeing = await care(row.id, kind, sector);
-    enrich({ hashimon_id: row.id, care_kind: kind, wellbeing: wellbeing.overall });
-    res.json({ wellbeing });
+    const { wellbeing, croquetas } = await care(row.id, kind, sector);
+    enrich({ hashimon_id: row.id, care_kind: kind, wellbeing: wellbeing.overall, croquetas });
+    res.json({ wellbeing, croquetas });
   })
 );

@@ -1,16 +1,20 @@
-import { isUniqueViolation, query, withTransaction, type DbClient } from "@/db/pool";
+import { isUniqueViolation, query, withTransaction, type DbClient, type Sql } from "@/db/pool";
 import { audit } from "@/domain/audit";
 import { config } from "@/config";
 import {
   calibratedShareTargetBits,
   deriveExtranonce1,
+  evaluateYield,
+  hashJob,
   verifyJobShare,
   type MiningJobRecord,
   type ShareSubmitInput,
   type JobHeader,
   type BitcoinShareSnapshot,
+  type YieldTier,
 } from "@/core/pow";
 import { getPreparedTemplate } from "@/domain/block-template";
+import { harvestPlaceForPlayer, bumpHeat } from "@/domain/vibing";
 import type { HashimonRow } from "@/domain/hashimons";
 import { enrich } from "@/http/wide-event";
 
@@ -270,4 +274,144 @@ export async function submitShare(
     }
     throw err;
   }
+}
+
+export interface YieldSubmitBody {
+  jobId: string;
+  extranonce2: number;
+  nonce: number;
+}
+
+export type YieldOutcome =
+  | { ok: true; tier: YieldTier; materialKey: string; yieldBits: number; hash: string }
+  | { ok: false; error: string; yieldBits?: number };
+
+/**
+ * PoW YIELD submission — the second harvest (docs/POW_YIELD_V1.md, VIBING_V1.md §2). Same
+ * body as a share, but the floor is the YIELD window, not the share-target bits: most yield
+ * hashes are BELOW the share threshold, which is the whole point (harvest work otherwise
+ * discarded). The server recomputes the hash and dedupes by `hash` (PK), so the same hash —
+ * or a submit to both routes — drops once.
+ *
+ * Two independent axes decide the drop (VIBING_V1.md §2):
+ *  - WORK: the hash's yield window clearing the floor is the EVENT — you struck something.
+ *  - PLACE: your Vibing tower's coordinate `zona(x,z)` decides the TIER you get. No tower →
+ *    the consumable floor at your vault. The tier is resolved server-side from the tower's
+ *    location — never a client claim — and every harvest heats that place.
+ * The hash's own yield tier is kept only as telemetry (how deep the strike was); the tier
+ * recorded and returned is the PLACE's.
+ */
+export async function submitYield(row: HashimonRow, body: YieldSubmitBody): Promise<YieldOutcome> {
+  const jobRow = await getJobForOwner(body.jobId, row.owner_id);
+  if (!jobRow || jobRow.hashimon_id !== row.id) {
+    enrich({ reject_reason: "stale_job" });
+    return { ok: false, error: "stale_job" };
+  }
+  const job = rowToJob(jobRow);
+
+  // Same binding as verifyJobShare, minus the share-bits floor (yield has its own floor).
+  if (job.expiresAt.getTime() < Date.now()) return { ok: false, error: "stale_job" };
+  if (job.extranonce1 !== deriveExtranonce1(row.dna)) return { ok: false, error: "dna_mismatch" };
+  if (!Number.isInteger(body.extranonce2) || body.extranonce2 < 0) return { ok: false, error: "invalid_nonce" };
+  if (!Number.isInteger(body.nonce) || body.nonce < 0 || body.nonce > 0xffffffff) {
+    return { ok: false, error: "invalid_nonce" };
+  }
+
+  const hash = hashJob(job, body.extranonce2, body.nonce);
+  const drop = evaluateYield(hash);
+  // The WORK gate: the yield window must clear the floor (drop.tier != null) to be a strike.
+  if (!drop.tier) {
+    enrich({ yield_bits: drop.yieldBits, yield_tier: "none" });
+    return { ok: false, error: "no_yield", yieldBits: drop.yieldBits };
+  }
+
+  // The PLACE decides the tier of what you actually harvest (and where it heats).
+  const spot = await harvestPlaceForPlayer(row.owner_id);
+  const tier = spot.tier;
+  enrich({ yield_bits: drop.yieldBits, yield_tier: tier, yield_place: spot.place });
+
+  try {
+    await withTransaction(async (client: DbClient) => {
+      await query(
+        `INSERT INTO pow_yield
+           (hash, hashimon_id, owner_id, job_id, yield_bits, tier, material_key, extranonce2, nonce, place)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [hash, row.id, row.owner_id, job.id, drop.yieldBits, tier, drop.materialKey,
+         body.extranonce2, body.nonce, spot.place],
+        client
+      );
+      await bumpHeat(spot, client);
+      await audit(client, {
+        playerId: row.owner_id,
+        hashimonId: row.id,
+        action: "yield_harvested",
+        detail: { jobId: job.id, tier, materialKey: drop.materialKey, yieldBits: drop.yieldBits, place: spot.place },
+      });
+    });
+  } catch (err: unknown) {
+    if (isUniqueViolation(err)) {
+      enrich({ reject_reason: "duplicate_yield" });
+      return { ok: false, error: "duplicate_yield" };
+    }
+    throw err;
+  }
+
+  return { ok: true, tier, materialKey: drop.materialKey, yieldBits: drop.yieldBits, hash };
+}
+
+export interface YieldSummary {
+  total: number;
+  byTier: Record<YieldTier, number>;
+  /** Unspent consumable yields — the Hashi-croqueta stock for Alimentar. */
+  croquetas: number;
+}
+
+/** Unspent Hashi-croquetas for this creature (consumable yields with no consumed_at). */
+export async function croquetaBalance(hashimonId: string, client?: Sql): Promise<number> {
+  const sql =
+    `SELECT count(*)::text AS n FROM pow_yield
+      WHERE hashimon_id = $1 AND tier = 'consumable' AND consumed_at IS NULL`;
+  const res = client
+    ? await query<{ n: string }>(sql, [hashimonId], client)
+    : await query<{ n: string }>(sql, [hashimonId]);
+  return Number(res.rows[0]?.n ?? 0);
+}
+
+/**
+ * Spend one croqueta (FIFO). Returns false if the creature has none left.
+ * Caller must run this inside a transaction when paired with care(hunger).
+ */
+export async function consumeCroqueta(hashimonId: string, client: DbClient): Promise<boolean> {
+  const res = await query<{ hash: string }>(
+    `UPDATE pow_yield
+        SET consumed_at = now()
+      WHERE hash = (
+        SELECT hash FROM pow_yield
+         WHERE hashimon_id = $1 AND tier = 'consumable' AND consumed_at IS NULL
+         ORDER BY created_at ASC
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED
+      )
+      RETURNING hash`,
+    [hashimonId],
+    client
+  );
+  return res.rows.length > 0;
+}
+
+/** What a creature has harvested so far, counted per tier (for the client to show). */
+export async function yieldSummary(hashimonId: string): Promise<YieldSummary> {
+  const res = await query<{ tier: YieldTier; n: string }>(
+    `SELECT tier, count(*)::text AS n FROM pow_yield WHERE hashimon_id = $1 GROUP BY tier`,
+    [hashimonId]
+  );
+  const byTier: Record<YieldTier, number> = { consumable: 0, durable: 0, capital: 0 };
+  let total = 0;
+  for (const r of res.rows) {
+    const n = Number(r.n);
+    byTier[r.tier] = n;
+    total += n;
+  }
+  const croquetas = await croquetaBalance(hashimonId);
+  return { total, byTier, croquetas };
 }

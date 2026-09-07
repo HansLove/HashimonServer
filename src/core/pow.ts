@@ -367,3 +367,46 @@ export function verifyJobShare(
     progression: progressionFromBits(bits),
   };
 }
+
+// ---------------------------------------------------------------------------
+// PoW YIELD (docs/POW_YIELD_V1.md) — the second harvest over the SAME work.
+// The 256-bit hash is split into disjoint windows; progression reads the leading
+// zeros of the whole hash (hex[0..]), yield reads a DISJOINT window hex[16..32].
+// Because SHA-256 is uniform, the two windows are independent: yield can be tuned
+// without moving the star curve. The player cannot steer the output into a window —
+// they choose what to send, never what they find, and the server recomputes.
+// ---------------------------------------------------------------------------
+
+/** Hex index of the yield window (bits 64..127) — disjoint from progression (hex[0..]). */
+export const YIELD_WINDOW = { start: 16, end: 32 } as const;
+/** Hex index of the material window (bits 128..191). */
+export const MATERIAL_WINDOW = { start: 32, end: 48 } as const;
+/** Nested leading-zero-bit thresholds. Croqueta floor is deliberately cheap: y≥20 ≈
+ *  one every ~5–20s at real browser hashrate (50–200k H/s). The old 26-bit floor
+ *  (~minutes–hours per drop) made basic food feel broken. Durable/capital stay rare
+ *  as strike-depth telemetry; PLACE (tower zone) still decides the recorded tier. */
+export const YIELD_THRESHOLDS = { consumable: 20, durable: 30, capital: 34 } as const;
+
+export type YieldTier = "consumable" | "durable" | "capital";
+
+export interface YieldResult {
+  /** Leading zero bits of the yield window — for re-deriving the tier / calibration. */
+  yieldBits: number;
+  /** null when the hash cleared no yield threshold (the overwhelming common case). */
+  tier: YieldTier | null;
+  /** Which concrete material within the tier, derived from the material window. */
+  materialKey: string;
+}
+
+/** Evaluate the yield windows of a recomputed hash. Pure + deterministic; the server is
+ *  the authority (recompute, never trust a client-reported drop). */
+export function evaluateYield(hash: string): YieldResult {
+  const h = hash.toLowerCase().replace(/^0x/, "");
+  const yieldBits = leadingZeroBits(h.slice(YIELD_WINDOW.start, YIELD_WINDOW.end));
+  let tier: YieldTier | null = null;
+  if (yieldBits >= YIELD_THRESHOLDS.capital) tier = "capital";
+  else if (yieldBits >= YIELD_THRESHOLDS.durable) tier = "durable";
+  else if (yieldBits >= YIELD_THRESHOLDS.consumable) tier = "consumable";
+  const materialKey = h.slice(MATERIAL_WINDOW.start, MATERIAL_WINDOW.end);
+  return { yieldBits, tier, materialKey };
+}
