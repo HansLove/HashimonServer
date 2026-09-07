@@ -1,7 +1,7 @@
-import { createApp } from "@/http/app";
-import { config } from "@/config";
-import { pool, waitForDb } from "@/db/pool";
-import { logger } from "@/logger";
+import { createApp } from "@/modules/core/http/app";
+import { config } from "@/modules/core/config";
+import { pool, waitForDb } from "@/modules/core/db/pool";
+import { logger } from "@/modules/core/logger";
 
 const app = createApp();
 const startedAt = Date.now();

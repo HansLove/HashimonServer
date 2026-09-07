@@ -1,7 +1,7 @@
 // Genera los vectores dorados de apariencia que atan el TypeScript y el Lua.
 // Uso: node --import tsx scripts/gen-wolker-golden.mts
 import { writeFileSync } from "node:fs";
-import { CHILD_DAYS, appearanceOf, signOf, wolkerId } from "@/domain/wolkers";
+import { CHILD_DAYS, appearanceOf, signOf, wolkerId } from "@/modules/territory/domain/wolkers";
 
 const NOW = new Date("2026-01-01T00:00:00Z");
 const vectors = [];

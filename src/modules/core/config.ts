@@ -1,0 +1,161 @@
+import "dotenv/config";
+import path from "node:path";
+import { CORE_VERSION } from "@/modules/core/core/index";
+
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`config: ${name} is required when HASHIMON_MINING_MODE=bitcoin and was not set`);
+  }
+  return value;
+}
+
+const DEFAULT_CORS_ORIGINS = [
+  "https://ihashima.com",
+  "https://www.ihashima.com",
+  "https://partners.hashima.xyz",
+  "http://localhost:8080",
+  "http://127.0.0.1:8080",
+  "http://localhost:8081",
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:3000",
+];
+
+function parseCorsOrigin(raw: string | undefined): string[] {
+  const extra = (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return [...new Set([...DEFAULT_CORS_ORIGINS, ...extra])];
+}
+
+// "bitcoin" requires a client that implements hashBitcoinJob (src/core/pow.ts) —
+// flipping this without a matching client rejects every share. Default stays "bound".
+const miningMode = (process.env.HASHIMON_MINING_MODE === "bitcoin" ? "bitcoin" : "bound") as "bound" | "bitcoin";
+
+export const config = {
+  env: process.env.NODE_ENV ?? "development",
+  port: Number(process.env.PORT ?? 4000),
+  databaseUrl: process.env.DATABASE_URL ?? "postgres://localhost:5432/hashimon",
+  sessionTtlHours: Number(process.env.SESSION_TTL_HOURS ?? 720),
+  //Se deriva de CORE_VERSION en vez de repetir el literal. Estaban desfasados:
+  //el log decía algo_version "caos-core@1" mientras las criaturas se sellaban
+  //con "caos-core@2" (hashimons.ts usa CORE_VERSION directamente). El campo del
+  //log es lo que se consulta para saber qué reglas produjeron una fila, así que
+  //mentir ahí es peor que no tenerlo.
+  //Anthropic. Sin clave, la ruta /chat responde 503 y lo dice: nunca falla en
+  //silencio ni cae a un modelo distinto sin avisar.
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
+  // Required for multi-workspace / identity-linked keys (header anthropic-workspace-id).
+  // Find it in Claude Console → Settings → Workspaces (wrkspc_…).
+  anthropicWorkspaceId: process.env.ANTHROPIC_WORKSPACE_ID ?? "",
+  anthropicModel: process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5",
+  //El planificador de Alen tiene su propio modelo: decide campañas, no charla
+  //con una mascota. claude-haiku-4-5 es la opción barata si el gasto aprieta —
+  //un cambio de variable, sin tocar código.
+  alenPlannerModel: process.env.ALEN_PLANNER_MODEL ?? "claude-opus-5",
+  //Modelo de la VOZ y del juicio, aparte del planificador a propósito. El plan
+  //elige verbos de una whitelist y Lua lo revalida, así que tolera un modelo
+  //barato; la conversación produce ego/respeto/intent, que mueven mecánicas sin
+  //red de seguridad. Medido en scripts/alen-appraisal-bench.mts: Haiku acierta la
+  //dirección pero le baila la magnitud entre llamadas idénticas (mismo insulto,
+  //ego -35 o -65), y ese umbral decide si Alen ataca. Por eso bajar el
+  //planificador a Haiku NO debe arrastrar la voz.
+  alenChatModel: process.env.ALEN_CHAT_MODEL ?? "claude-opus-5",
+  //Las dos válvulas de gasto del planificador. Se comprueban ANTES de construir
+  //la petición, así que un tope alcanzado no cuesta ni un token.
+  alenPlanMinIntervalS: Number(process.env.ALEN_PLAN_MIN_INTERVAL_S ?? 180),
+  alenPlanMaxPerDay: Number(process.env.ALEN_PLAN_MAX_PER_DAY ?? 60),
+  //Conversar y decidir campañas son presupuestos distintos: hablar es barato y
+  //frecuente, planificar es caro y raro.
+  alenChatMaxPerDay: Number(process.env.ALEN_CHAT_MAX_PER_DAY ?? 150),
+  //El consejo de los wolkers: barato y raro por diseño. La FSM del mundo decide sola
+  //el 99 % del tiempo; el modelo sólo entra cuando el town está en una situación que
+  //una regla no sabe leer, y estas dos válvulas se comprueban ANTES de construir la
+  //petición, así que un tope alcanzado no cuesta un token.
+  wolkerCouncilModel: process.env.WOLKER_COUNCIL_MODEL ?? "claude-haiku-4-5",
+  wolkerCouncilMinIntervalS: Number(process.env.WOLKER_COUNCIL_MIN_INTERVAL_S ?? 300),
+  wolkerCouncilMaxPerDay: Number(process.env.WOLKER_COUNCIL_MAX_PER_DAY ?? 40),
+  //Turnos gratis por criatura antes de empezar a cobrar créditos.
+  chatFreeTurns: Number(process.env.CHAT_FREE_TURNS ?? 20),
+  //Créditos por turno una vez agotado el cupo.
+  chatCreditsPerTurn: Number(process.env.CHAT_CREDITS_PER_TURN ?? 1),
+  algoVersion: process.env.ALGO_VERSION ?? CORE_VERSION,
+  // Stamped on every log event so a failure can be traced back to the deploy that
+  // shipped it. The image has no .git, so the Dockerfile bakes it in as a build arg.
+  commitSha: process.env.COMMIT_SHA ?? "dev",
+  shareTargetBits: Number(process.env.HASHIMON_SHARE_TARGET_BITS ?? 20),
+  jobTtlMs: Number(process.env.HASHIMON_JOB_TTL_MS ?? 900_000),
+  blockTargetBits: Number(process.env.HASHIMON_BLOCK_TARGET_BITS ?? 64),
+  // Always includes ihashima.com and the partners portal origin; CORS_ORIGIN
+  // adds more. The Origin header is scheme+host (no path), so /login is not listed.
+  corsOrigin: parseCorsOrigin(process.env.CORS_ORIGIN),
+  // Base del enlace que un afiliado copia y pega. Es el sitio público, NO el
+  // portal: el enlace lleva clientes a registrarse, no a la oficina del afiliado.
+  publicSiteUrl: (process.env.PUBLIC_SITE_URL ?? "https://ihashima.com").replace(/\/+$/, ""),
+  luantiServerSecret: process.env.LUANTI_SERVER_SECRET ?? "",
+  // Hace AUDITABLE la semilla de nacimiento: con ella, cada birth_nonce es
+  // recomputable desde su entrada, así que el servidor puede demostrar que no
+  // molió nonces para fabricar una criatura rara. Vacío = randomBytes puro; se
+  // pierde la auditabilidad, no la seguridad, y nunca bloquea un nacimiento.
+  birthSecret: process.env.BIRTH_SECRET ?? "",
+  // MAGI (finite cubic object). The seal secret is what makes a note unforgeable:
+  // it never leaves this process, so a player editing item metadata cannot produce a
+  // seal that verifies. Empty means the MAGI routes answer 503 rather than issue
+  // notes nobody can trust.
+  magiSealSecret: process.env.MAGI_SEAL_SECRET ?? "",
+  // Hard ceiling on notes ever issued. Issuance past it is refused — the point of the
+  // object is that no admin can silently print more.
+  magiSupplyCap: Number(process.env.MAGI_SUPPLY_CAP ?? 21_000),
+  // Backing recorded on each note at issue time. Not a redemption promise.
+  magiSatsPerMagi: Number(process.env.MAGI_SATS_PER_MAGI ?? 1_000),
+  // Reserve epoch stamped into every seal, so notes from a past epoch are
+  // distinguishable (and re-sealable) without touching the ledger rows.
+  magiEpoch: Number(process.env.MAGI_EPOCH ?? 1),
+  // Bitcoin Core RPC URL with basic-auth credentials embedded (user:pass@host:port).
+  // Never log this value — see src/domain/block-template.ts.
+  btcNodeUrl: process.env.BTC_NODE_CONNECTION_URL ?? "",
+  miningMode,
+  templateRefreshMs: Number(process.env.HASHIMON_TEMPLATE_REFRESH_MS ?? 30_000),
+  // Segwit address (bech32/bech32m) the coinbase output pays — never submitted to the
+  // network today, but a real address keeps the template well-formed instead of an
+  // unspendable OP_RETURN. Required only in bitcoin mode, no default — see
+  // src/domain/bitcoin-address.ts.
+  coinbaseAddress: miningMode === "bitcoin" ? requireEnv("HASHIMON_COINBASE_ADDRESS") : (process.env.HASHIMON_COINBASE_ADDRESS ?? ""),
+  // BTCPay Server — credit purchases. The middleware reads these env names on its own,
+  // but config stays the single source and hands them to configure() explicitly.
+  // btcpayApiKey and btcpayWebhookSecret are secrets: never log them, never enrich() them.
+  btcpayBaseUrl: process.env.BTCPAY_BASE_URL ?? "",
+  btcpayApiKey: process.env.BTCPAY_API_KEY ?? "",
+  btcpayStoreId: process.env.BTCPAY_STORE_ID ?? "",
+  btcpayWebhookSecret: process.env.BTCPAY_WEBHOOK_SECRET ?? "",
+  // How much a payment may fall short and still settle, in percent. Real on-chain
+  // payments land a hair under the invoice all the time (a wallet's fee estimate, a
+  // rate that moved between quote and broadcast), and BTCPay's default 0 turns that
+  // into an expired invoice the player actually paid for. Applied by BTCPay itself,
+  // per invoice: within tolerance it sends InvoiceSettled and the credit path below
+  // is untouched — the shortfall is never reconciled by hand here.
+  // `||`, not `??`: a blank or non-numeric value must fall back, not become NaN.
+  btcpayPaymentTolerance: Number(process.env.BTCPAY_PAYMENT_TOLERANCE) || 3,
+  // CaosEngine — assisted incubation. Empty base URL means the /incubation routes answer
+  // 503 instead of charging credits for a lot nobody will ever mine.
+  caosEngineUrl: process.env.CAOS_ENGINE_URL ?? "",
+  // Not read by CaosEngine today (its auth guards are commented out on that side) — kept
+  // so turning them on is an env change here, not a deploy. A secret: never log it.
+  caosApiKey: process.env.CAOS_API_KEY ?? "",
+  // Absolute, PUBLICLY REACHABLE base URL of this server. It is what a lot's webhook URL
+  // is built from, so CaosEngine can only deliver shares if this resolves from its host —
+  // localhost is fine only when both run on the same machine.
+  publicUrl: process.env.HASHIMON_PUBLIC_URL ?? "",
+  // P9: one hour, counted from ASSIGNMENT, not from payment. The longest lot (50 marks)
+  // takes ~6 minutes, so this is 10x the worst case — past it the miner is genuinely
+  // hung and the lot refunds in full, unprompted.
+  // `||`, not `??`: an unset variable is not the only way this arrives empty — an Ansible
+  // template that rendered nothing, or a blank line in .env, both give "" here, and
+  // Number("") is 0. A zero timeout expires and refunds every lot the instant it is
+  // assigned, while the pool keeps mining a batch nobody will ever collect; a non-numeric
+  // value gives NaN, which reaches Postgres as 'NaN milliseconds' and 500s every read.
+  incubationLotTimeoutMs: Number(process.env.INCUBATION_LOT_TIMEOUT_MS) || 3_600_000,
+  // discovery_maps terrain PNGs for the public cadastral underlay. Absolute path or
+  // relative to process.cwd(); create-on-write in domain/map-tiles.ts.
+  mapTilesDir: process.env.MAP_TILES_DIR ?? path.join(process.cwd(), "data", "map-tiles"),
+} as const;

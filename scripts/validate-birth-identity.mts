@@ -10,8 +10,8 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { birthIdentityOf, SPIRITS } from "@/core/birth-identity";
-import { Hashimons, GenesisV2, isGenesisV2 } from "@/data/species";
+import { birthIdentityOf, SPIRITS } from "@/modules/core/core/birth-identity";
+import { Hashimons, GenesisV2, isGenesisV2 } from "@/modules/hashimon/data/species";
 
 //El dump Lua vive en el repo, no en el paquete api.
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");

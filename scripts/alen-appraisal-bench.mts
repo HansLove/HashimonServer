@@ -6,9 +6,9 @@
 // lo que corre en producción — reimplementar el prompt aquí sería medir otra cosa.
 //
 //   cd api && node --import tsx scripts/alen-appraisal-bench.mts [repeticiones]
-import { buildChatPrompt, REPLY_SCHEMA, type ChatContext } from "@/domain/alen-chat";
-import { ALEN_SYSTEM_PROMPT } from "@/domain/alen-planner";
-import { askModelStructured } from "@/domain/anthropic";
+import { buildChatPrompt, REPLY_SCHEMA, type ChatContext } from "@/modules/alen/domain/alen-chat";
+import { ALEN_SYSTEM_PROMPT } from "@/modules/alen/domain/alen-planner";
+import { askModelStructured } from "@/modules/companion/domain/anthropic";
 
 const MODELS = ["claude-haiku-4-5", "claude-opus-5"];
 const REPS = Number(process.argv[2] ?? 2);

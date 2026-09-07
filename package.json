@@ -11,15 +11,15 @@
   "scripts": {
     "preinstall": "npx only-allow pnpm",
     "dev": "tsx watch src/server.ts",
-    "build": "tsc --noEmit && esbuild src/server.ts src/db/migrate.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outdir=dist && cp src/db/schema.sql dist/db/schema.sql",
+    "build": "tsc --noEmit && esbuild src/server.ts src/modules/core/db/migrate.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outdir=dist && cp src/modules/core/db/schema.sql dist/modules/core/db/schema.sql",
     "start": "node dist/server.js",
-    "migrate": "node dist/db/migrate.js",
-    "migrate:dev": "node --import tsx src/db/migrate.ts",
+    "migrate": "node dist/modules/core/db/migrate.js",
+    "migrate:dev": "node --import tsx src/modules/core/db/migrate.ts",
     "typecheck": "tsc --noEmit",
     "validate:birth": "node --import tsx scripts/validate-birth-identity.mts",
     "affiliates": "node --import tsx scripts/affiliates.mts",
     "alen:bench": "node --import tsx --env-file=.env scripts/alen-appraisal-bench.mts",
-    "test": "node --import tsx --test src/core/core.test.ts src/domain/auth.test.ts src/domain/block-template.test.ts src/domain/bitcoin-address.test.ts src/domain/payments.test.ts src/domain/affiliates.test.ts src/http/affiliate-routes.test.ts src/domain/incubation.test.ts src/http/wide-event.test.ts src/domain/magi.test.ts src/domain/map-markers.test.ts src/domain/food.test.ts src/domain/wolkers.test.ts src/domain/wolker-council.test.ts src/domain/armies.test.ts"
+    "test": "node --import tsx --test src/modules/core/core/core.test.ts src/modules/player/domain/auth.test.ts src/modules/mining/domain/block-template.test.ts src/modules/mining/domain/bitcoin-address.test.ts src/modules/payments/domain/payments.test.ts src/modules/affiliate/domain/affiliates.test.ts src/modules/affiliate/http/affiliate-routes.test.ts src/modules/incubation/domain/incubation.test.ts src/modules/core/http/wide-event.test.ts src/modules/magi/domain/magi.test.ts src/modules/map/domain/map-markers.test.ts src/modules/mining/domain/food.test.ts src/modules/territory/domain/wolkers.test.ts src/modules/territory/domain/wolker-council.test.ts src/modules/territory/domain/armies.test.ts"
   },
   "dependencies": {
     "@noble/secp256k1": "2.2.3",

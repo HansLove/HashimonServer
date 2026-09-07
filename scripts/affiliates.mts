@@ -9,8 +9,8 @@
 //   pnpm affiliates pagado DANIEL <txid>                        marcar pagado, con recibo
 //   pnpm affiliates quien DANIEL                                a quién trajo y cuánto compró
 //   pnpm affiliates equipo DANIEL                               sus sub-afiliados
-import { pool, query } from "@/db/pool";
-import { affiliateLink, markPaid, pendingPayouts, subAffiliatesOf } from "@/domain/affiliates";
+import { pool, query } from "@/modules/core/db/pool";
+import { affiliateLink, markPaid, pendingPayouts, subAffiliatesOf } from "@/modules/affiliate/domain/affiliates";
 
 const usd = (v: string | number) => `$${Number(v).toFixed(2)}`;
 
