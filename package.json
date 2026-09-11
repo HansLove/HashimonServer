@@ -10,9 +10,9 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "dev": "tsx watch src/server.ts",
-    "build": "tsc --noEmit && esbuild src/server.ts src/modules/core/db/migrate.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outdir=dist && cp src/modules/core/db/schema.sql dist/modules/core/db/schema.sql",
-    "start": "node dist/server.js",
+    "dev": "node init && tsx watch src/server.ts",
+    "build": "node init && tsc --noEmit && esbuild src/server.ts src/modules/core/db/migrate.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outdir=dist && cp src/modules/core/db/schema.sql dist/modules/core/db/schema.sql",
+    "start": "node init && node dist/server.js",
     "migrate": "node dist/modules/core/db/migrate.js",
     "migrate:dev": "node --import tsx src/modules/core/db/migrate.ts",
     "typecheck": "tsc --noEmit",
@@ -29,6 +29,7 @@
     "cors": "2.8.6",
     "dotenv": "16.4.5",
     "express": "4.19.2",
+    "node-fetch": "^3.3.2",
     "pg": "8.12.0",
     "pino": "10.3.1",
     "zod": "3.23.8"
