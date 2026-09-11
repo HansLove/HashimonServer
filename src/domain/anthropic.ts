@@ -35,7 +35,12 @@ export function anthropicConfigured(): boolean {
 export async function askModel(
   system: string,
   messages: ChatMessage[],
-  opts: { maxTokens?: number; signal?: AbortSignal } = {}
+  opts: {
+    maxTokens?: number;
+    signal?: AbortSignal;
+    /** Optional JSON schema; keeps the full chat history (unlike askModelStructured). */
+    schema?: Record<string, unknown>;
+  } = {}
 ): Promise<ModelReply> {
   if (!config.anthropicApiKey) {
     throw new AnthropicError("ANTHROPIC_API_KEY no está configurada", 503, false);
@@ -51,18 +56,25 @@ export async function askModel(
     headers["anthropic-workspace-id"] = config.anthropicWorkspaceId;
   }
 
+  const body: Record<string, unknown> = {
+    model: config.anthropicModel,
+    //Una mascota habla corto. El tope es también el techo de gasto por turno.
+    max_tokens: opts.maxTokens ?? 300,
+    system,
+    messages,
+  };
+  if (opts.schema) {
+    body.output_config = {
+      format: { type: "json_schema", schema: opts.schema },
+    };
+  }
+
   let res: Response;
   try {
     res = await fetch(API, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        model: config.anthropicModel,
-        //Una mascota habla corto. El tope es también el techo de gasto por turno.
-        max_tokens: opts.maxTokens ?? 300,
-        system,
-        messages,
-      }),
+      body: JSON.stringify(body),
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
   } catch (err) {
@@ -70,10 +82,10 @@ export async function askModel(
   }
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
+    const bodyText = await res.text().catch(() => "");
     //429 y 5xx se pueden reintentar; 400 y 401 son culpa nuestra y no.
     throw new AnthropicError(
-      `el proveedor respondió ${res.status}: ${body.slice(0, 300)}`,
+      `el proveedor respondió ${res.status}: ${bodyText.slice(0, 300)}`,
       res.status,
       res.status === 429 || res.status >= 500
     );

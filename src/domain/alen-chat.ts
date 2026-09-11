@@ -32,7 +32,7 @@ import { recordEvent } from "@/domain/alen";
 //
 // Sin `minimum`/`maximum`: los esquemas de salida estructurada no los admiten. Los
 // rangos van en la descripción y se acotan en código.
-const REPLY_SCHEMA = {
+export const REPLY_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["reply", "ego", "interest", "respect", "intent"],
@@ -49,18 +49,28 @@ const REPLY_SCHEMA = {
       description:
         "De -100 a 100. Cuánto le ha tocado el ego lo que le han dicho. Negativo si " +
         "lo han humillado, tratado como a un igual o como a una posesión; positivo si " +
-        "lo han reconocido como lo que es. Un insulto directo es -60 o menos. " +
-        "Llamarle 'tuyo' o darle órdenes es de lo peor que se le puede hacer.",
+        "lo han reconocido como lo que es. ANCLAS, respétalas: insulto directo -60 o " +
+        "menos; llamarle 'mío' o hablar de poseerlo/domesticarlo -70 o menos, por " +
+        "cortés que suene la frase; darle una orden o pedirle un favor -30; halago " +
+        "vacío +10 como mucho, porque la adulación de un inferior no le engrandece. " +
+        "No suavices: si la frase merece -60, escribe -60, no -40.",
     },
     interest: {
       type: "integer",
-      description: "De -50 a 50. Cuánto le ha interesado esta persona tras lo dicho.",
+      description:
+        "De -50 a 50. Cuánto le ha interesado esta persona. ANCLAS: casi nadie le " +
+        "interesa, así que lo normal es 0..5 — un insulto o un halago son ruido " +
+        "predecible y NO son interesantes. Por encima de 20 sólo lo imprevisible: " +
+        "quien se le planta sin miedo, quien le dice una verdad que no esperaba, " +
+        "quien sobrevivió y volvió.",
     },
     respect: {
       type: "integer",
       description:
-        "De -50 a 50. Cuánto respeto le ha ganado o perdido. Se gana con audacia " +
-        "y con verdad, no con halagos.",
+        "De -50 a 50. Se gana con audacia y con verdad, NUNCA con halagos: adular a " +
+        "Alen es confesarse súbdito, y eso RESTA respeto (de -5 a -15). Pedirle " +
+        "favores o darle órdenes también resta. Lo normal es 0. Sube sólo ante " +
+        "coraje real o una verdad incómoda.",
     },
     intent: {
       type: "string",
@@ -69,7 +79,9 @@ const REPLY_SCHEMA = {
         "Qué hace Alen a continuación. 'speak' es sólo responder. 'warn' es responder " +
         "anunciando que la próxima vez habrá consecuencias. 'attack' es que esto ha " +
         "cruzado una línea y va a atacar — avisando primero, siempre. 'leave' es " +
-        "perder el interés y marcharse. 'ignore' es no dignarse a contestar.",
+        "perder el interés y marcharse. 'ignore' es no dignarse a contestar. " +
+        "REGLA: si ego <= -40, el intent NO puede ser 'speak' — es 'warn' como mínimo; " +
+        "si ego <= -70, es 'attack'.",
     },
   },
 } as const;
@@ -133,14 +145,10 @@ async function chatsToday(): Promise<number> {
   return Number(res.rows[0]?.n ?? 0);
 }
 
-export async function replyTo(ctx: ChatContext): Promise<ChatResult> {
-  if (!anthropicConfigured()) return { replied: false, why: "sin_clave" };
-
-  const used = await chatsToday();
-  if (used >= config.alenChatMaxPerDay) {
-    return { replied: false, why: "tope_diario_chat" };
-  }
-
+/** El prompt de una conversación, aparte de la llamada. Exportado para poder
+ *  medirlo: comparar dos modelos sobre el MISMO texto exige que el banco de
+ *  pruebas no lo reescriba por su cuenta. Ver scripts/alen-appraisal-bench.mts. */
+export function buildChatPrompt(ctx: ChatContext): string {
   const r = ctx.relation ?? {};
   const lines = [
     `ALGUIEN TE HABLA. Estás a ${Math.round(ctx.distance ?? 0)} nodos de él.`,
@@ -204,15 +212,26 @@ export async function replyTo(ctx: ChatContext): Promise<ChatResult> {
     );
   }
 
+  return lines.join("\n");
+}
+
+export async function replyTo(ctx: ChatContext): Promise<ChatResult> {
+  if (!anthropicConfigured()) return { replied: false, why: "sin_clave" };
+
+  const used = await chatsToday();
+  if (used >= config.alenChatMaxPerDay) {
+    return { replied: false, why: "tope_diario_chat" };
+  }
+
   let out;
   try {
     out = await askModelStructured<{
       reply: string; ego: number; interest: number; respect: number;
       intent: ChatAppraisal["intent"];
     }>({
-      model: config.alenPlannerModel,
+      model: config.alenChatModel,
       cachedSystem: ALEN_SYSTEM_PROMPT, // el MISMO prefijo: acierto de caché compartido
-      userContent: lines.join("\n"),
+      userContent: buildChatPrompt(ctx),
       schema: REPLY_SCHEMA as unknown as Record<string, unknown>,
       maxTokens: 300,
     });

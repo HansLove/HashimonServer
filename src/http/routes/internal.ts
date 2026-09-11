@@ -10,6 +10,7 @@ import {
   listLuantiAuthEntries,
   presentPlayer,
   registerLuantiGuest,
+  setPlayerCheckpointByUsername,
 } from "@/domain/players";
 import {
   listPendingTownActions,
@@ -37,6 +38,8 @@ import {
 } from "@/domain/map-markers";
 import {
   applyWorldDeltas,
+  capacityFor,
+  recordTownCapacity,
   rosterForTown,
   seedGenesis,
   townSituation,
@@ -174,6 +177,7 @@ const townsSchema = z.object({
         // generous ceiling that still bounds the row.
         blocks: z.array(blockTriple).max(20_000).default([]),
         members: z.array(memberSchema).max(2_000).default([]),
+        invites: z.array(z.string().min(1).max(64)).max(500).default([]),
       })
     )
     .max(5_000),
@@ -198,6 +202,7 @@ internalRouter.post(
       homeZ: t.home ? t.home[2] : null,
       blocks: t.blocks,
       members: t.members,
+      invites: t.invites ?? [],
     }));
     const count = await replaceTownClaims(input);
     enrich({ towns_result: "ok", town_count: count });
@@ -484,6 +489,33 @@ internalRouter.post(
   })
 );
 
+const playerPosSchema = z.object({
+  name: z.string().min(1).max(20),
+  x: z.number().finite(),
+  y: z.number().finite(),
+  z: z.number().finite(),
+});
+
+/** Checkpoint snapshot from Luanti (leaveplayer or ~5 min throttle). Not real-time. */
+internalRouter.post(
+  "/internal/luanti-player-position",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const body = playerPosSchema.parse(req.body ?? {});
+    const ok = await setPlayerCheckpointByUsername(body.name, {
+      x: body.x,
+      y: body.y,
+      z: body.z,
+    });
+    enrich({
+      username: body.name,
+      player_checkpoint: ok ? "ok" : "unknown_player",
+    });
+    // Unknown username is soft-ok: guests without an API row cannot be checkpointed.
+    res.json({ ok });
+  })
+);
+
 
 const alenChatSchema = z.object({
   player: z.string().min(1).max(40),
@@ -621,5 +653,27 @@ internalRouter.post(
     const decision = await councilFor(situation, { hostiles, damage });
     enrich({ town_name: town, council_posture: decision.posture, council_source: decision.source });
     res.json({ ...decision, situation });
+  })
+);
+
+const capacitySchema = z.object({
+  town: z.string().min(1).max(64),
+  /** Camas construidas dentro del claim. Sólo el mundo las ve. */
+  beds: z.number().int().min(0).max(10_000),
+  hearth: z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() }).nullable(),
+});
+
+/** El mundo empuja camas y Hogar; el techo se recalcula a partir de eso más la despensa y
+ *  el claim, que el servidor ya conoce. Devuelve el techo resultante para que el HUD del
+ *  alcalde pueda decir cuál de los tres términos le está frenando. */
+internalRouter.post(
+  "/internal/luanti-wolkers-capacity",
+  asyncHandler(async (req, res) => {
+    requireLuantiSecret(req);
+    const { town, beds, hearth } = capacitySchema.parse(req.body ?? {});
+    await recordTownCapacity({ townName: town, beds, hearth });
+    const capacity = await capacityFor(town);
+    enrich({ town_name: town, wolker_cap: capacity.cap, wolker_bottleneck: capacity.bottleneck });
+    res.json({ ok: true, capacity });
   })
 );

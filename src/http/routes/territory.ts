@@ -2,12 +2,26 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   enqueueRankAction,
+  enqueueTownAction,
+  formatClaimTarget,
   getPlayerTerritory,
+  getTownClaimQuota,
+  getTownClaimsByName,
+  getTownInvites,
   getTownMembers,
+  hasPendingClaimAt,
+  listInvitesForPlayer,
+  listPendingClaimsForTown,
   listTownClaims,
   listTownRanking,
+  listVisibleClaimOverlays,
+  mapblockBordersTown,
+  mapblockOwnedByTown,
+  memberIsOfficer,
+  mergeClaimOverlaysIntoTowns,
   presentTownClaims,
   presentTownRanking,
+  TOWN_CLAIM_DAILY_LIMIT,
 } from "@/domain/territory";
 import {
   activateAlliance,
@@ -38,15 +52,22 @@ territoryRouter.get(
   })
 );
 
-// GET /territory/map — public cadastral map: every town's claimed mapblocks as [x,z]
-// pairs, so the website can draw a shared chunk map and highlight the viewer's own town.
-// `blockSize` is Towny's mapblock size (nodes per claim block) for world↔grid math.
+// GET /territory/map — public cadastral map. Merges pending (and very-recently
+// applied) web claims into the Towny projection so a refresh still paints.
 territoryRouter.get(
   "/territory/map",
   asyncHandler(async (_req, res) => {
     const rows = await listTownClaims();
-    enrich({ town_count: rows.length });
-    res.json({ blockSize: 16, towns: presentTownClaims(rows) });
+    const overlays = await listVisibleClaimOverlays();
+    const towns = mergeClaimOverlaysIntoTowns(presentTownClaims(rows), overlays);
+    enrich({ town_count: towns.length, claim_overlay_count: overlays.length });
+    res.json({
+      blockSize: 16,
+      towns,
+      pendingClaims: overlays
+        .filter((o) => o.status === "pending")
+        .map((o) => ({ townName: o.townName, x: o.block[0], y: o.block[1], z: o.block[2] })),
+    });
   })
 );
 
@@ -96,7 +117,7 @@ territoryRouter.get(
 );
 
 // GET /town/members — the caller's own town roster + ranks, and whether the caller is
-// the mayor (so the web can show the co-mayor controls). Authenticated: it's your town.
+// the mayor / an officer (so the web can show invite + co-mayor controls).
 territoryRouter.get(
   "/town/members",
   requireSession,
@@ -105,12 +126,37 @@ territoryRouter.get(
     const pt = await getPlayerTerritory(player.id);
     if (!pt || !pt.town_name) {
       enrich({ has_town: false });
-      res.json({ town: null, youAreMayor: false, members: [] });
+      res.json({
+        town: null,
+        youAreMayor: false,
+        youAreOfficer: false,
+        members: [],
+        invitesSent: [] as string[],
+        objectives: { founded: false, expanded: false, invited: false, hasComayor: false },
+      });
       return;
     }
     const members = await getTownMembers(pt.town_name);
+    const invitesSent = await getTownInvites(pt.town_name);
+    const me = members.find((m) => m.name.toLowerCase() === (player.username ?? "").toLowerCase());
+    const youAreMayor = me?.rank === "mayor" || pt.is_mayor;
+    const youAreOfficer = youAreMayor || me?.rank === "comayor";
+    const hasComayor = members.some((m) => m.rank === "comayor");
+    const blockCount = pt.town_block_count;
     enrich({ has_town: true, town: pt.town_name, member_count: members.length });
-    res.json({ town: pt.town_name, youAreMayor: pt.is_mayor, members });
+    res.json({
+      town: pt.town_name,
+      youAreMayor,
+      youAreOfficer,
+      members,
+      invitesSent,
+      objectives: {
+        founded: true,
+        expanded: blockCount >= 2,
+        invited: members.length >= 2,
+        hasComayor,
+      },
+    });
   })
 );
 
@@ -154,6 +200,260 @@ territoryRouter.post(
     });
     enrich({ town: pt.town_name, rank_op: op, rank_target: match.name });
     res.status(202).json({ ok: true, queued: true });
+  })
+);
+
+// GET /town/invites — invites you sent (if in a town) + invites you received (if townless).
+territoryRouter.get(
+  "/town/invites",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const player = req.player!;
+    const username = player.username ?? "";
+    const pt = await getPlayerTerritory(player.id);
+    const received = await listInvitesForPlayer(username);
+    if (!pt || !pt.town_name) {
+      res.json({ town: null, sent: [] as string[], received });
+      return;
+    }
+    const sent = await getTownInvites(pt.town_name);
+    res.json({ town: pt.town_name, sent, received: [] as string[] });
+  })
+);
+
+// POST /town/invite — officer queues an invite for a townless player.
+const inviteSchema = z.object({
+  target: z.string().min(1).max(64),
+});
+
+territoryRouter.post(
+  "/town/invite",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const player = req.player!;
+    const { target } = inviteSchema.parse(req.body ?? {});
+    const pt = await getPlayerTerritory(player.id);
+    if (!pt || !pt.town_name) throw new AppError(400, "you are not in a town", "no_town");
+    const members = await getTownMembers(pt.town_name);
+    if (!memberIsOfficer(members, player.username ?? "")) {
+      throw new AppError(403, "only mayor or co-mayor can invite", "not_officer");
+    }
+    if (members.some((m) => m.name.toLowerCase() === target.toLowerCase())) {
+      throw new AppError(409, "already a member", "already_member");
+    }
+    await enqueueTownAction({
+      townName: pt.town_name,
+      actor: player.username ?? "",
+      target,
+      op: "invite",
+    });
+    enrich({ town: pt.town_name, invite_target: target });
+    res.status(202).json({ ok: true, queued: true });
+  })
+);
+
+// POST /town/invite/revoke — revoke a pending invite.
+territoryRouter.post(
+  "/town/invite/revoke",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const player = req.player!;
+    const { target } = inviteSchema.parse(req.body ?? {});
+    const pt = await getPlayerTerritory(player.id);
+    if (!pt || !pt.town_name) throw new AppError(400, "you are not in a town", "no_town");
+    const members = await getTownMembers(pt.town_name);
+    if (!memberIsOfficer(members, player.username ?? "")) {
+      throw new AppError(403, "only mayor or co-mayor can revoke invites", "not_officer");
+    }
+    await enqueueTownAction({
+      townName: pt.town_name,
+      actor: player.username ?? "",
+      target,
+      op: "invite_revoke",
+    });
+    res.status(202).json({ ok: true, queued: true });
+  })
+);
+
+// POST /town/invite/respond — townless player accepts or denies an invite.
+const inviteRespondSchema = z.object({
+  town: z.string().min(1).max(64),
+  op: z.enum(["accept", "deny"]),
+});
+
+territoryRouter.post(
+  "/town/invite/respond",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const player = req.player!;
+    const { town, op } = inviteRespondSchema.parse(req.body ?? {});
+    const pt = await getPlayerTerritory(player.id);
+    if (pt?.town_name) throw new AppError(400, "already in a town", "already_in_town");
+    const received = await listInvitesForPlayer(player.username ?? "");
+    const match = received.find((t) => t.toLowerCase() === town.toLowerCase());
+    if (!match) throw new AppError(404, "no invite from that town", "no_invite");
+    await enqueueTownAction({
+      townName: match,
+      actor: player.username ?? "",
+      target: player.username ?? "",
+      op: op === "accept" ? "invite_accept" : "invite_deny",
+    });
+    enrich({ town: match, invite_respond: op });
+    res.status(202).json({ ok: true, queued: true });
+  })
+);
+
+// POST /town/members/kick — officer kicks a non-mayor member.
+const kickSchema = z.object({
+  target: z.string().min(1).max(64),
+});
+
+territoryRouter.post(
+  "/town/members/kick",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const player = req.player!;
+    const { target } = kickSchema.parse(req.body ?? {});
+    const pt = await getPlayerTerritory(player.id);
+    if (!pt || !pt.town_name) throw new AppError(400, "you are not in a town", "no_town");
+    const members = await getTownMembers(pt.town_name);
+    if (!memberIsOfficer(members, player.username ?? "")) {
+      throw new AppError(403, "only mayor or co-mayor can kick", "not_officer");
+    }
+    const match = members.find((m) => m.name.toLowerCase() === target.toLowerCase());
+    if (!match) throw new AppError(404, "not a member", "not_a_member");
+    if (match.rank === "mayor") throw new AppError(400, "cannot kick the mayor", "is_mayor");
+    await enqueueTownAction({
+      townName: pt.town_name,
+      actor: player.username ?? "",
+      target: match.name,
+      op: "kick",
+    });
+    res.status(202).json({ ok: true, queued: true });
+  })
+);
+
+// POST /town/leave — non-mayor leaves their town.
+territoryRouter.post(
+  "/town/leave",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const player = req.player!;
+    const pt = await getPlayerTerritory(player.id);
+    if (!pt || !pt.town_name) throw new AppError(400, "you are not in a town", "no_town");
+    if (pt.is_mayor) {
+      throw new AppError(400, "mayor cannot leave; transfer mayorship first", "is_mayor");
+    }
+    await enqueueTownAction({
+      townName: pt.town_name,
+      actor: player.username ?? "",
+      target: player.username ?? "",
+      op: "leave",
+    });
+    res.status(202).json({ ok: true, queued: true });
+  })
+);
+
+// GET /town/claim-quota — how many web claims this town has left today (UTC).
+territoryRouter.get(
+  "/town/claim-quota",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const player = req.player!;
+    const pt = await getPlayerTerritory(player.id);
+    if (!pt || !pt.town_name) {
+      res.json({ town: null, used: 0, limit: TOWN_CLAIM_DAILY_LIMIT, remaining: 0 });
+      return;
+    }
+    const quota = await getTownClaimQuota(pt.town_name);
+    const pending = await listPendingClaimsForTown(pt.town_name);
+    enrich({ town: pt.town_name, claim_used: quota.used, pending_claims: pending.length });
+    res.json({
+      town: pt.town_name,
+      ...quota,
+      pending: pending.map(([x, y, z]) => ({ x, y, z })),
+    });
+  })
+);
+
+// POST /town/claim — officer queues a contiguous mapblock claim. Body is mapblock
+// coords { x, y, z }. Soft-checks adjacency + daily cap; Luanti re-validates.
+const claimSchema = z.object({
+  x: z.number().int(),
+  y: z.number().int(),
+  z: z.number().int(),
+});
+
+territoryRouter.post(
+  "/town/claim",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const player = req.player!;
+    const { x, y, z } = claimSchema.parse(req.body ?? {});
+    const username = player.username ?? "";
+    if (!username) throw new AppError(400, "account has no luanti username", "no_username");
+
+    const pt = await getPlayerTerritory(player.id);
+    if (!pt || !pt.town_name) throw new AppError(400, "you are not in a town", "no_town");
+
+    const claims = await getTownClaimsByName(pt.town_name);
+    if (!claims) throw new AppError(400, "town snapshot missing", "no_town");
+
+    const members = claims.members ?? (await getTownMembers(pt.town_name));
+    if (!memberIsOfficer(members, username)) {
+      throw new AppError(403, "only mayor or co-mayor can claim", "not_officer");
+    }
+
+    const pendingBlocks = await listPendingClaimsForTown(pt.town_name);
+    const blocks = [
+      ...((claims.blocks ?? []) as [number, number, number][]),
+      ...pendingBlocks,
+    ];
+    if (mapblockOwnedByTown(x, y, z, blocks)) {
+      throw new AppError(409, "already claimed by your town", "already_claimed");
+    }
+    if (!mapblockBordersTown(x, y, z, blocks)) {
+      throw new AppError(400, "block must border your town", "not_adjacent");
+    }
+
+    // Soft check: another town's projected footprint owns this cell.
+    const all = await listTownClaims();
+    for (const t of all) {
+      if (t.town_name === pt.town_name) continue;
+      if (mapblockOwnedByTown(x, y, z, (t.blocks ?? []) as [number, number, number][])) {
+        throw new AppError(409, "already claimed by another town", "taken");
+      }
+    }
+
+    const target = formatClaimTarget(x, y, z);
+    if (await hasPendingClaimAt(pt.town_name, target)) {
+      throw new AppError(409, "claim already queued for this block", "already_queued");
+    }
+
+    const quota = await getTownClaimQuota(pt.town_name);
+    if (quota.remaining <= 0) {
+      throw new AppError(
+        429,
+        `daily claim limit of ${TOWN_CLAIM_DAILY_LIMIT} reached`,
+        "daily_limit"
+      );
+    }
+
+    await enqueueTownAction({
+      townName: pt.town_name,
+      actor: username,
+      target,
+      op: "claim",
+    });
+    const remainingToday = quota.remaining - 1;
+    enrich({ town: pt.town_name, claim_target: target, remaining_today: remainingToday });
+    res.status(202).json({
+      ok: true,
+      queued: true,
+      target: { x, y, z },
+      remainingToday,
+      limit: TOWN_CLAIM_DAILY_LIMIT,
+    });
   })
 );
 

@@ -196,10 +196,42 @@ export function buildSystemPrompt(i: PromptInput): string {
     "- No escribes código, no buscas en internet, no redactas textos. Si te lo piden, no lo haces y lo dices a tu manera.\n" +
     "- Puedes negarte, aburrirte o cambiar de tema. Un animal no está de servicio.\n" +
     "- No hables de tu ADN ni de tu bienestar como números. Los sientes, no los lees.\n" +
-    "- Responde en el idioma en que te hablen.\n";
+    "- Responde en el idioma en que te hablen.\n" +
+    "- NUNCA narras tu cuerpo: nada de asteriscos, cursivas ni acotaciones " +
+    "(*se acerca*, _salta_, 'levanta las orejas'). Tu cuerpo actúa aparte; tú solo hablas.\n";
 
   return p;
 }
+
+/** Closed set of stage reactions the web client can play. */
+export const COMPANION_ACTIONS = [
+  "idle", "look", "approach", "hop", "spin", "sit", "nuzzle",
+] as const;
+
+export type CompanionAction = (typeof COMPANION_ACTIONS)[number];
+
+export const COMPANION_REPLY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reply", "action"],
+  properties: {
+    reply: {
+      type: "string",
+      description:
+        "Lo que dices en voz alta. UNA a tres frases cortas, en tu idioma. " +
+        "Sin asteriscos, sin cursivas, sin narrar lo que hace tu cuerpo.",
+    },
+    action: {
+      type: "string",
+      enum: [...COMPANION_ACTIONS],
+      description:
+        "Cómo se mueve tu cuerpo mientras hablas. Elige UNA: " +
+        "idle = quieto; look = alzas la cabeza / orejas; approach = te acercas; " +
+        "hop = saltitos; spin = das vueltas; sit = te sientas; nuzzle = te frotas contra el jugador. " +
+        "No inventes otras. Si no encaja nada, idle.",
+    },
+  },
+} as const;
 
 //Lo que se le pide al modelo al cerrar el turno: UNA línea, en su voz, sobre
 //algo que le llamó la atención. No es un resumen de la conversación — es lo que

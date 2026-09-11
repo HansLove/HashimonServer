@@ -7,7 +7,8 @@ import { query, withTransaction, type DbClient } from "@/db/pool";
 import { askModel, type ChatMessage } from "@/domain/anthropic";
 import {
   buildSystemPrompt, memoryPrompt, temperamentOf, wellbeingOf,
-  MEMORY_PROFILE, type CareKind, type CompanionRow, type Wellbeing,
+  COMPANION_ACTIONS, COMPANION_REPLY_SCHEMA, MEMORY_PROFILE,
+  type CareKind, type CompanionAction, type CompanionRow, type Wellbeing,
 } from "@/domain/companion";
 import { consumeCroqueta, croquetaBalance } from "@/domain/mining";
 import { AppError } from "@/http/errors";
@@ -94,7 +95,12 @@ export type SpeakInput = {
 };
 
 export async function speak(input: SpeakInput): Promise<{
-  reply: string; wellbeing: Wellbeing; freeTurnsLeft: number; credits: number; keepsake: string | null;
+  reply: string;
+  action: CompanionAction;
+  wellbeing: Wellbeing;
+  freeTurnsLeft: number;
+  credits: number;
+  keepsake: string | null;
 }> {
   const state = await loadState(input.hashimonId, input.ownerId);
 
@@ -124,7 +130,10 @@ export async function speak(input: SpeakInput): Promise<{
   });
 
   const messages: ChatMessage[] = [...history.rows, { role: "user", content: input.message }];
-  const reply = await askModel(system, messages);
+  const raw = await askModel(system, messages, {
+    schema: COMPANION_REPLY_SCHEMA as unknown as Record<string, unknown>,
+  });
+  const { reply, action } = parseCompanionReply(raw.text);
 
   //El recuerdo NO se pide cada turno. Un animal no se queda con algo nuevo en
   //cada frase, y la segunda llamada cuesta casi tanto como la primera —medido:
@@ -138,7 +147,7 @@ export async function speak(input: SpeakInput): Promise<{
   try {
     if (turnNumber % MEMORY_EVERY !== 0) throw new SkipMemory();
     const t = temperamentOf(input.dna);
-    const k = await askModel(system, [...messages, { role: "assistant", content: reply.text },
+    const k = await askModel(system, [...messages, { role: "assistant", content: reply },
       { role: "user", content: memoryPrompt(t) }], { maxTokens: 80 });
     const line = k.text.trim().replace(/^["'\s]+|["'\s]+$/g, "");
     if (line && line.toUpperCase() !== "NADA" && line.length <= 240) keepsake = line;
@@ -158,7 +167,7 @@ export async function speak(input: SpeakInput): Promise<{
     await c.query(
       `INSERT INTO chat_turns (hashimon_id, role, content, input_tokens, output_tokens, credits_spent)
        VALUES ($1,'assistant',$2,$3,$4,$5)`,
-      [input.hashimonId, reply.text, reply.inputTokens, reply.outputTokens, spent]
+      [input.hashimonId, reply, raw.inputTokens, raw.outputTokens, spent]
     );
     if (spent > 0) {
       await c.query(`UPDATE players SET credits = credits - $2 WHERE id = $1`, [input.ownerId, spent]);
@@ -183,9 +192,38 @@ export async function speak(input: SpeakInput): Promise<{
 
   const after = await loadState(input.hashimonId, input.ownerId);
   return {
-    reply: reply.text, wellbeing: after.wellbeing,
+    reply, action, wellbeing: after.wellbeing,
     freeTurnsLeft: after.freeTurnsLeft, credits: after.credits, keepsake,
   };
+}
+
+function parseCompanionReply(raw: string): { reply: string; action: CompanionAction } {
+  try {
+    const parsed = JSON.parse(raw) as { reply?: unknown; action?: unknown };
+    const reply = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
+    const action =
+      typeof parsed.action === "string" &&
+      (COMPANION_ACTIONS as readonly string[]).includes(parsed.action)
+        ? (parsed.action as CompanionAction)
+        : "idle";
+    if (reply) return { reply, action };
+  } catch {
+    /* fall through: model sometimes returns plain text */
+  }
+  const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+  try {
+    const parsed = JSON.parse(cleaned) as { reply?: unknown; action?: unknown };
+    const reply = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
+    const action =
+      typeof parsed.action === "string" &&
+      (COMPANION_ACTIONS as readonly string[]).includes(parsed.action)
+        ? (parsed.action as CompanionAction)
+        : "idle";
+    if (reply) return { reply, action };
+  } catch {
+    /* plain dialogue fallback */
+  }
+  return { reply: raw.trim() || "…", action: "idle" };
 }
 
 //Atender un cuidado concreto. Es lo que cierra el bucle: la criatura pide, el

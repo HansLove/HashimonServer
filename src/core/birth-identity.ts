@@ -180,7 +180,7 @@ export const SPIRITS: readonly Spirit[] = [
     line: ["feline"], kin: null },
   { key: "guardian", name: "Guardian", nameEs: "Guardián",
     archetype: "protección, fuerza, responsabilidad",
-    line: ["ursine", "megafauna"], kin: null },
+    line: ["ursine"], kin: null },
   { key: "beacon", name: "Beacon", nameEs: "Faro",
     archetype: "visión, dirección, descubrimiento",
     line: ["avian", "pterosaur"], kin: null },

@@ -13,6 +13,7 @@ function requireEnv(name: string): string {
 const DEFAULT_CORS_ORIGINS = [
   "https://ihashima.com",
   "https://www.ihashima.com",
+  "https://partners.hashima.xyz",
   "http://localhost:8080",
   "http://127.0.0.1:8080",
   "http://localhost:8081",
@@ -52,6 +53,14 @@ export const config = {
   //con una mascota. claude-haiku-4-5 es la opción barata si el gasto aprieta —
   //un cambio de variable, sin tocar código.
   alenPlannerModel: process.env.ALEN_PLANNER_MODEL ?? "claude-opus-5",
+  //Modelo de la VOZ y del juicio, aparte del planificador a propósito. El plan
+  //elige verbos de una whitelist y Lua lo revalida, así que tolera un modelo
+  //barato; la conversación produce ego/respeto/intent, que mueven mecánicas sin
+  //red de seguridad. Medido en scripts/alen-appraisal-bench.mts: Haiku acierta la
+  //dirección pero le baila la magnitud entre llamadas idénticas (mismo insulto,
+  //ego -35 o -65), y ese umbral decide si Alen ataca. Por eso bajar el
+  //planificador a Haiku NO debe arrastrar la voz.
+  alenChatModel: process.env.ALEN_CHAT_MODEL ?? "claude-opus-5",
   //Las dos válvulas de gasto del planificador. Se comprueban ANTES de construir
   //la petición, así que un tope alcanzado no cuesta ni un token.
   alenPlanMinIntervalS: Number(process.env.ALEN_PLAN_MIN_INTERVAL_S ?? 180),
@@ -77,8 +86,12 @@ export const config = {
   shareTargetBits: Number(process.env.HASHIMON_SHARE_TARGET_BITS ?? 20),
   jobTtlMs: Number(process.env.HASHIMON_JOB_TTL_MS ?? 900_000),
   blockTargetBits: Number(process.env.HASHIMON_BLOCK_TARGET_BITS ?? 64),
-  // Always includes https://ihashima.com; CORS_ORIGIN adds more origins.
+  // Always includes ihashima.com and the partners portal origin; CORS_ORIGIN
+  // adds more. The Origin header is scheme+host (no path), so /login is not listed.
   corsOrigin: parseCorsOrigin(process.env.CORS_ORIGIN),
+  // Base del enlace que un afiliado copia y pega. Es el sitio público, NO el
+  // portal: el enlace lleva clientes a registrarse, no a la oficina del afiliado.
+  publicSiteUrl: (process.env.PUBLIC_SITE_URL ?? "https://ihashima.com").replace(/\/+$/, ""),
   luantiServerSecret: process.env.LUANTI_SERVER_SECRET ?? "",
   // Hace AUDITABLE la semilla de nacimiento: con ella, cada birth_nonce es
   // recomputable desde su entrada, así que el servidor puede demostrar que no

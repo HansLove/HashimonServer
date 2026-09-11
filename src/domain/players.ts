@@ -16,6 +16,7 @@ import {
   type Custody,
 } from "@/domain/crypto";
 import { emit, present, type HashimonRow } from "@/domain/hashimons";
+import { resolveAffiliateCode } from "@/domain/affiliates";
 import { birthIdentityOf, isPlausibleDob, type BirthIdentity } from "@/core/birth-identity";
 
 export interface Player {
@@ -37,6 +38,17 @@ export interface Player {
   genesis_element: string | null;
   birth_version: number | null;
   birth_set_at: string | null;
+  //Quién trajo a esta cuenta. Se escribe una vez, en el registro, y no se
+  //reasigna nunca: cambiarlo después reescribiría a quién se le debe dinero
+  //por compras que ya ocurrieron. No se expone en presentPlayer — es un dato
+  //del libro de comisiones, no del perfil.
+  referred_by: string | null;
+  referred_at: string | null;
+  /** Last checkpoint from Luanti (world nodes); null until the world pushes once. */
+  last_x: number | null;
+  last_y: number | null;
+  last_z: number | null;
+  last_pos_at: string | null;
 }
 
 /** Ownership requires a secp256k1 public key (web register). Guests have none. */
@@ -95,6 +107,56 @@ export async function getPlayerByUsername(username: string): Promise<Player | nu
   return res.rows[0] ?? null;
 }
 
+/** Snapshot from Luanti (leaveplayer / periodic). Overwrites the previous checkpoint. */
+export async function setPlayerCheckpoint(
+  playerId: string,
+  pos: { x: number; y: number; z: number }
+): Promise<void> {
+  await query(
+    `UPDATE players
+        SET last_x = $2, last_y = $3, last_z = $4, last_pos_at = now()
+      WHERE id = $1`,
+    [playerId, pos.x, pos.y, pos.z]
+  );
+}
+
+export async function setPlayerCheckpointByUsername(
+  username: string,
+  pos: { x: number; y: number; z: number }
+): Promise<boolean> {
+  const res = await query(
+    `UPDATE players
+        SET last_x = $2, last_y = $3, last_z = $4, last_pos_at = now()
+      WHERE lower(username) = lower($1)`,
+    [username, pos.x, pos.y, pos.z]
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+export type PlayerCheckpoint = {
+  x: number;
+  y: number;
+  z: number;
+  at: string;
+};
+
+export function checkpointOf(player: Player): PlayerCheckpoint | null {
+  if (
+    player.last_x == null ||
+    player.last_y == null ||
+    player.last_z == null ||
+    !player.last_pos_at
+  ) {
+    return null;
+  }
+  return {
+    x: player.last_x,
+    y: player.last_y,
+    z: player.last_z,
+    at: player.last_pos_at,
+  };
+}
+
 export interface Session {
   token: string;
   player_id: string;
@@ -136,6 +198,11 @@ export async function registerOwner(input: {
   dob: string;
   publicKey?: string;
   custody?: Custody;
+  //El código de afiliado que venía en la URL (?ref=). Opcional siempre: un
+  //código inválido se ignora, nunca rompe un registro. Sólo se captura en el
+  //alta web — un invitado de Luanti que reclama su cuenta ya estaba jugando,
+  //así que no llegó por un enlace de nadie.
+  ref?: string;
 }): Promise<{
   player: Player;
   session: Session;
@@ -176,14 +243,23 @@ export async function registerOwner(input: {
   enrich({ custody: keyMaterial.custody, argon2_ms: elapsedMs(hashStartedAt) });
   const luantiPassword = luantiSrpEntry(username, input.password);
 
+  //Se resuelve contra la tabla antes de escribirlo, así que en players.referred_by
+  //sólo puede acabar un código que existe y está activo — la FK nunca es la que
+  //descubre un enlace mal copiado. Un código inválido deja esto en null y el
+  //registro sigue su curso.
+  const referredBy = await resolveAffiliateCode(input.ref);
+  enrich({ referred_by: referredBy, ref_supplied: Boolean(input.ref) });
+
   let player: Player;
   try {
     const inserted = await query<Player>(
       `INSERT INTO players (
          username, password_hash, luanti_password, public_key, display_name,
          enc_private_key, kdf_salt, kdf_params, custody,
-         birth_spirit, life_number, genesis_element, birth_version, birth_set_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, now())
+         birth_spirit, life_number, genesis_element, birth_version, birth_set_at,
+         referred_by, referred_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, now(),
+                 $14, CASE WHEN $14::text IS NULL THEN NULL ELSE now() END)
        RETURNING *`,
       [
         username,
@@ -199,6 +275,7 @@ export async function registerOwner(input: {
         identity.lifeNumber,
         identity.element,
         identity.version,
+        referredBy,
       ]
     );
     player = inserted.rows[0]!;

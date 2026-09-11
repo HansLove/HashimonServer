@@ -541,6 +541,21 @@ async function applyVerifiedShare(lot: LotRow, payload: CaosSharePayload): Promi
       return { ok: true as const, duplicate: true as const, lot };
     }
 
+    //Croqueta de energía: cada marca verificada de una incubación deja comida en la
+    //despensa, igual que una cosecha del navegador. Es la segunda fuente de comida del
+    //mundo y la que hace que incubar alimente a tu pueblo además de criar a tu bicho —
+    //los wolkers no distinguen el sabor, sólo cuentan croquetas sin gastar.
+    //Va con el mismo `hash` que la marca (PK global), así que una redelivery no puede
+    //duplicar comida: la puerta de arriba ya devolvió antes de llegar aquí.
+    await query(
+      `INSERT INTO pow_yield
+         (hash, hashimon_id, owner_id, yield_bits, tier, material_key, extranonce2, nonce, place)
+       VALUES ($1, $2, $3, $4, 'consumable', 'incubation', 0, $5, $6)
+       ON CONFLICT DO NOTHING`,
+      [payload.hash, row.id, lot.owner_id, verdict.bits, payload.nonce, `incubation:${lot.id}`],
+      client
+    );
+
     //The record is decided against the COLUMN, never against the value read before the
     //transaction opened. A player browser-mining while their lot runs is two writers on one
     //creature, and comparing against a stale read lets the slower one overwrite a better

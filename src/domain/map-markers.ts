@@ -164,6 +164,32 @@ export async function deletePlayerWaypoint(playerId: string, id: string): Promis
   }
 }
 
+export async function updatePlayerWaypoint(
+  playerId: string,
+  id: string,
+  patch: { label?: string; x?: number; y?: number; z?: number }
+): Promise<MapMarkerRow> {
+  const res = await query<MapMarkerRow>(
+    `UPDATE map_markers SET
+       label = COALESCE($3, label),
+       x = COALESCE($4, x),
+       y = COALESCE($5, y),
+       z = COALESCE($6, z)
+     WHERE id = $1 AND kind = 'player' AND owner_player_id = $2 AND status = 'active'
+     RETURNING *`,
+    [
+      id,
+      playerId,
+      patch.label !== undefined ? patch.label.trim().slice(0, 80) || "Waypoint" : null,
+      patch.x ?? null,
+      patch.y ?? null,
+      patch.z ?? null,
+    ]
+  );
+  if (!res.rows[0]) throw new AppError(404, "waypoint not found", "not_found");
+  return { ...res.rows[0], meta: parseMeta(res.rows[0].meta) };
+}
+
 /** Mayor or co-mayor of the caller's town may place nation POIs. */
 export async function assertCanEditNation(
   playerId: string,
@@ -225,6 +251,32 @@ export async function deleteNationPoi(townName: string, id: string): Promise<voi
   if ((res.rowCount ?? 0) === 0) {
     throw new AppError(404, "nation POI not found", "not_found");
   }
+}
+
+export async function updateNationPoi(
+  townName: string,
+  id: string,
+  patch: { label?: string; x?: number; y?: number; z?: number }
+): Promise<MapMarkerRow> {
+  const res = await query<MapMarkerRow>(
+    `UPDATE map_markers SET
+       label = COALESCE($3, label),
+       x = COALESCE($4, x),
+       y = COALESCE($5, y),
+       z = COALESCE($6, z)
+     WHERE id = $1 AND kind = 'nation' AND town_name = $2 AND status = 'active'
+     RETURNING *`,
+    [
+      id,
+      townName,
+      patch.label !== undefined ? patch.label.trim().slice(0, 80) || "POI" : null,
+      patch.x ?? null,
+      patch.y ?? null,
+      patch.z ?? null,
+    ]
+  );
+  if (!res.rows[0]) throw new AppError(404, "nation POI not found", "not_found");
+  return { ...res.rows[0], meta: parseMeta(res.rows[0].meta) };
 }
 
 export type CapitalInfo = {
@@ -444,6 +496,7 @@ export async function bundleForPlayer(
   capital: CapitalInfo | null;
   canEditNation: boolean;
   townName: string | null;
+  checkpoint: { x: number; y: number; z: number; at: string } | null;
 }> {
   await ensureAllHashimonDestinations(playerId);
   const pt = await getPlayerTerritory(playerId);
@@ -458,11 +511,13 @@ export async function bundleForPlayer(
     }
   }
 
-  const [waypoints, nationPois, hashimonQuests, capital] = await Promise.all([
+  const { getPlayer, checkpointOf } = await import("@/domain/players");
+  const [waypoints, nationPois, hashimonQuests, capital, player] = await Promise.all([
     listPlayerWaypoints(playerId),
     townName ? listNationPois(townName) : Promise.resolve([]),
     listActiveHashimonQuests(playerId),
     capitalForPlayer(playerId),
+    getPlayer(playerId),
   ]);
 
   return {
@@ -472,6 +527,7 @@ export async function bundleForPlayer(
     capital,
     canEditNation,
     townName,
+    checkpoint: player ? checkpointOf(player) : null,
   };
 }
 

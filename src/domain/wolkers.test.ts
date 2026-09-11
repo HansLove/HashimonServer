@@ -5,8 +5,14 @@ import assert from "node:assert/strict";
 import {
   CHILD_DAYS,
   GENESIS_LITTER,
+  BIRTH_COST,
   appearanceOf,
   applyWorldDeltas,
+  attractivenessOf,
+  breedTick,
+  capacityFor,
+  moraleTargetFor,
+  recordTownCapacity,
   censusTick,
   rosterForTown,
   signOf,
@@ -271,6 +277,237 @@ describe("wolkers census (against the local DB)", () => {
     assert.equal(s.avgHunger, 90);
     assert.equal(s.starving, GENESIS_LITTER);
     assert.equal(s.deaths7d, 0);
+  });
+
+  // --- Fase 2: techo y crianza -------------------------------------------------------
+
+  const hearth = { x: 4, y: 8, z: 4 };
+
+  // Cada town de prueba vive en su propio rincón del mapa. Compartir coordenada hacía que
+  // los towns de tests anteriores contaran como vecinos a un paso, y la emigración —que es
+  // global por diseño— los encontraba. El aislamiento aquí es geográfico, no de esquema.
+  let plot = 0;
+  function nextSpot() {
+    plot++;
+    return { x: plot * 20_000, y: 8, z: plot * 20_000 };
+  }
+
+  /** Un town donde nacer es posible: Hogar puesto, camas, comida y claim de sobra. */
+  async function seedFertileTown(beds = 8, croquetas = 60, spot = nextSpot()) {
+    const t = await seedTown();
+    await query(`UPDATE town_claims SET block_count = 40 WHERE town_name = $1`, [t.townName]);
+    await plantCroquetas(t.hashimonId, t.playerId, croquetas);
+    await recordTownCapacity({ townName: t.townName, beds, hearth: spot });
+    await seedGenesis(t.townName, spot);
+    // Adultos, no ancianos: 100 días está por encima de CHILD_DAYS (30) y por debajo de
+    // ELDER_DAYS (180). Envejecerlos más hacía que un `random()` de 0 —el que fuerza los
+    // partos— disparase también la tirada de vejez y matase al pueblo entero en el mismo tick.
+    await query(
+      `UPDATE wolkers SET born_at = now() - interval '100 days' WHERE town_name = $1`,
+      [t.townName]
+    );
+    return { ...t, spot };
+  }
+
+  it("the ceiling is the tightest of three terms, and says which one", async () => {
+    const { townName, playerId, hashimonId } = await seedTown();
+    await query(`UPDATE town_claims SET block_count = 40 WHERE town_name = $1`, [townName]);
+    await plantCroquetas(hashimonId, playerId, 30);
+    await recordTownCapacity({ townName, beds: 3, hearth });
+
+    const c = await capacityFor(townName);
+    assert.equal(c.byBeds, 6);      // 3 camas × 2
+    assert.equal(c.byFood, 10);     // 30 croquetas ÷ 3
+    assert.equal(c.byBlocks, 160);  // 40 bloques × 4
+    assert.equal(c.cap, 6);
+    assert.equal(c.bottleneck, "beds");
+    assert.deepEqual(c.hearth, hearth);
+  });
+
+  it("a town that only claims map is capped by food, not by ambition", async () => {
+    const { townName } = await seedTown();
+    await query(`UPDATE town_claims SET block_count = 500 WHERE town_name = $1`, [townName]);
+    await recordTownCapacity({ townName, beds: 100, hearth });
+    const c = await capacityFor(townName);
+    assert.equal(c.cap, 0);
+    assert.equal(c.bottleneck, "food");
+  });
+
+  it("no hearth, no births: settling people is the player's decision", async () => {
+    const t = await seedFertileTown();
+    await recordTownCapacity({ townName: t.townName, beds: 8, hearth: null });
+    const res = await withTransaction((client) => breedTick(t.townName, client, () => 0));
+    assert.deepEqual(res, { births: 0, blockedBy: "hearth" });
+  });
+
+  it("a birth costs three croquetas out of the same larder", async () => {
+    const t = await seedFertileTown();
+    const before = await townLarder(t.townName);
+    const balanceBefore = await croquetaBalance(t.hashimonId);
+
+    // random() = 0 → siempre por debajo de p: se cría todo lo que las puertas permitan.
+    const res = await withTransaction((client) => breedTick(t.townName, client, () => 0));
+    assert.ok(res.births > 0, "debería haber nacido alguien");
+    assert.equal(await townLarder(t.townName), before - res.births * BIRTH_COST);
+    // La misma comida que le habría tocado a la criatura.
+    assert.equal(await croquetaBalance(t.hashimonId), balanceBefore - res.births * BIRTH_COST);
+    assert.equal(await population(t.townName), GENESIS_LITTER + res.births);
+  });
+
+  it("the newborn is a child, born at the hearth, with a verifiable lineage", async () => {
+    const t = await seedFertileTown();
+    await withTransaction((client) => breedTick(t.townName, client, () => 0));
+
+    const baby = await query<{ id: string; parent_a: string; parent_b: string; birth_nonce: number;
+                              home_x: number; home_z: number; born_at: Date }>(
+      `SELECT id, parent_a, parent_b, birth_nonce, home_x, home_z, born_at
+         FROM wolkers WHERE town_name = $1 ORDER BY born_at DESC LIMIT 1`,
+      [t.townName]
+    );
+    const b = baby.rows[0]!;
+    assert.equal(b.id, wolkerId(b.parent_a, b.parent_b, b.birth_nonce));
+    assert.equal(b.home_x, t.spot.x);
+    assert.equal(b.home_z, t.spot.z);
+    assert.equal(appearanceOf(b.id, new Date(b.born_at)).model, "wolker_small");
+    // Padres de signo opuesto: el signo por fin significa algo mecánico.
+    assert.equal(signOf(b.parent_a) + signOf(b.parent_b), 0);
+  });
+
+  it("the curve is logistic: at the ceiling, nothing is born", async () => {
+    const t = await seedFertileTown(2); // techo 4 = exactamente la camada genesis
+    const res = await withTransaction((client) => breedTick(t.townName, client, () => 0));
+    assert.deepEqual(res, { births: 0, blockedBy: "beds" });
+  });
+
+  it("nobody is born onto an empty plate — and the block says what to fix", async () => {
+    // Comida justa para alimentar a los vivos, pero no para sostener a uno más: el término
+    // de comida del techo muerde antes que nadie, y se reporta como 'food', no como 'cap'.
+    const t = await seedFertileTown(8, GENESIS_LITTER + BIRTH_COST - 1);
+    const res = await withTransaction((client) => breedTick(t.townName, client, () => 0));
+    assert.deepEqual(res, { births: 0, blockedBy: "food" });
+  });
+
+  it("the genesis litter is never dealt infertile", async () => {
+    // Cuatro del mismo signo salía una de cada ocho veces; ahora se reparte 2 y 2 por
+    // construcción, sin dejar de ser determinista desde el homeblock.
+    for (let i = 0; i < 6; i++) {
+      const { townName } = await seedTown();
+      const ids = await seedGenesis(townName, home);
+      const sum = ids.reduce((acc, id) => acc + signOf(id), 0);
+      assert.equal(sum, 0, `camada desequilibrada: ${ids.map(signOf).join(",")}`);
+    }
+  });
+
+  it("children do not breed, and parents rest 48h", async () => {
+    const t = await seedFertileTown();
+    const first = await withTransaction((client) => breedTick(t.townName, client, () => 0));
+    assert.ok(first.births > 0);
+
+    // Los recién nacidos son niños y los padres están en cooldown: sin adultos libres.
+    const second = await withTransaction((client) => breedTick(t.townName, client, () => 0));
+    assert.equal(second.births, 0);
+    assert.equal(second.blockedBy, "pairs");
+  });
+
+  it("the census tick feeds before it breeds", async () => {
+    const t = await seedFertileTown();
+    await query(`UPDATE wolkers SET hunger = 40 WHERE town_name = $1`, [t.townName]);
+    const before = await townLarder(t.townName);
+
+    const res = await censusTick({ random: () => 0, townName: t.townName });
+    assert.equal(res.fed, GENESIS_LITTER);
+    assert.ok(res.births > 0);
+    // Se pagaron las dos cosas de la misma despensa, comida primero.
+    assert.equal(await townLarder(t.townName), before - GENESIS_LITTER - res.births * BIRTH_COST);
+  });
+
+  // --- Fase 3: moral y emigración -----------------------------------------------------
+
+  it("morale is earned with food, beds, a hearth and safety — nothing else", () => {
+    const good = moraleTargetFor({ hunger: 0, population: 4, beds: 4, hasHearth: true, deaths7d: 0 });
+    assert.equal(good.target, 65); // 50 + 0 + 10 + 5 - 0
+
+    // Sin camas y con muertos, el mismo pueblo se hunde por debajo del umbral de fuga.
+    const bad = moraleTargetFor({ hunger: 80, population: 10, beds: 0, hasHearth: false, deaths7d: 4 });
+    assert.equal(bad.housing, -15);
+    assert.equal(bad.losses, -20);
+    assert.ok(bad.target < 25, `esperaba fuga, salió ${bad.target}`);
+
+    // Un pueblo arrasado no baja de cero: el suelo existe.
+    const razed = moraleTargetFor({ hunger: 100, population: 50, beds: 0, hasHearth: false, deaths7d: 99 });
+    assert.equal(razed.target, 0);
+  });
+
+  it("distance and recent deaths make a neighbour unattractive", () => {
+    const here = { x: 0, y: 0, z: 0 };
+    const rich = { townName: "Rica", home: { x: 50, y: 0, z: 0 }, larder: 100, population: 10, avgMorale: 70, deaths7d: 0 };
+    const far = { ...rich, townName: "Lejana", home: { x: 3000, y: 0, z: 0 } };
+    const bloody = { ...rich, townName: "Sangrienta", deaths7d: 5 };
+
+    assert.ok(attractivenessOf(rich, here) > attractivenessOf(far, here));
+    assert.ok(attractivenessOf(rich, here) > attractivenessOf(bloody, here));
+  });
+
+  it("one bad tick does not empty a town; two do", async () => {
+    const t = await seedFertileTown();
+    // Se le quita todo: sin camas, sin comida, con hambre. La moral cae hacia el suelo.
+    await recordTownCapacity({ townName: t.townName, beds: 0, hearth: t.spot });
+    await query(`DELETE FROM pow_yield WHERE owner_id = $1`, [t.playerId]);
+    await query(`UPDATE wolkers SET hunger = 95, morale = 30 WHERE town_name = $1`, [t.townName]);
+
+    const first = await censusTick({ random: () => 1, townName: t.townName });
+    assert.equal(first.emigrated, 0, "nadie se va al primer disgusto");
+    const ticks = await query<{ low_morale_ticks: number; morale: number }>(
+      `SELECT low_morale_ticks, morale FROM wolkers WHERE town_name = $1 LIMIT 1`, [t.townName]
+    );
+    assert.equal(ticks.rows[0]!.low_morale_ticks, 1);
+    assert.ok(ticks.rows[0]!.morale < 25);
+  });
+
+  it("people vote with their feet: a better neighbour drains a bad town", async () => {
+    const bad = await seedFertileTown();
+    // El buen vecino, a tiro de piedra del malo: 40 nodos, dentro del alcance de una mudanza.
+    const nextDoor = { x: bad.spot.x + 40, y: 8, z: bad.spot.z + 40 };
+    const good = await seedFertileTown(20, 200, nextDoor);
+    await query(`UPDATE wolkers SET morale = 90 WHERE town_name = $1`, [good.townName]);
+
+    // Al malo se le quita todo y se le deja a su gente al borde de la fuga.
+    await recordTownCapacity({ townName: bad.townName, beds: 0, hearth: bad.spot });
+    await query(`DELETE FROM pow_yield WHERE owner_id = $1`, [bad.playerId]);
+    await query(
+      `UPDATE wolkers SET hunger = 95, morale = 20, low_morale_ticks = 1 WHERE town_name = $1`,
+      [bad.townName]
+    );
+
+    const res = await censusTick({ random: () => 1, townName: bad.townName });
+    assert.ok(res.emigrated > 0, "la gente debería haberse ido al vecino");
+    assert.equal(await population(bad.townName), GENESIS_LITTER - res.emigrated);
+    assert.equal(await population(good.townName), GENESIS_LITTER + res.emigrated);
+
+    // Y queda escrito por los dos lados: quién los perdió y quién los ganó.
+    const moves = await query<{ from_town: string; to_town: string; kind: string }>(
+      `SELECT from_town, to_town, kind FROM wolker_events
+        WHERE kind IN ('emigrate','immigrate') AND from_town = $1`,
+      [bad.townName]
+    );
+    assert.equal(moves.rows.length, res.emigrated * 2);
+    assert.equal(moves.rows[0]!.to_town, good.townName);
+  });
+
+  it("with nowhere better to go, the unhappy stay unhappy", async () => {
+    const t = await seedFertileTown();
+    await recordTownCapacity({ townName: t.townName, beds: 0, hearth: t.spot });
+    await query(`DELETE FROM pow_yield WHERE owner_id = $1`, [t.playerId]);
+    await query(
+      `UPDATE wolkers SET hunger = 95, morale = 20, low_morale_ticks = 1 WHERE town_name = $1`,
+      [t.townName]
+    );
+    // Los vecinos ricos existen, pero están a 20.000 nodos: fuera del alcance de una mudanza.
+    await seedFertileTown(20, 200);
+
+    const res = await censusTick({ random: () => 1, townName: t.townName });
+    assert.equal(res.emigrated, 0);
+    assert.equal(await population(t.townName), GENESIS_LITTER);
   });
 
   it("crossing into starvation is announced once, not every tick", async () => {

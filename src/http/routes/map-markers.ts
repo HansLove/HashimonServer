@@ -11,6 +11,8 @@ import {
   deleteNationPoi,
   deletePlayerWaypoint,
   presentMarker,
+  updateNationPoi,
+  updatePlayerWaypoint,
 } from "@/domain/map-markers";
 
 export const mapMarkersRouter = Router();
@@ -22,6 +24,16 @@ const placeBody = z.object({
   z: coord,
   label: z.string().trim().max(80).optional(),
 });
+const patchBody = z
+  .object({
+    x: coord.optional(),
+    y: coord.optional(),
+    z: coord.optional(),
+    label: z.string().trim().max(80).optional(),
+  })
+  .refine((b) => b.x !== undefined || b.y !== undefined || b.z !== undefined || b.label !== undefined, {
+    message: "at least one of x, y, z, label required",
+  });
 
 /** Bundle: personal + nation + hashimon quests + capital. Authenticated. */
 mapMarkersRouter.get(
@@ -80,6 +92,21 @@ mapMarkersRouter.delete(
   })
 );
 
+mapMarkersRouter.patch(
+  "/map/waypoints/:id",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const id = req.params.id!;
+    if (!z.string().uuid().safeParse(id).success) {
+      throw new AppError(400, "invalid id", "invalid_id");
+    }
+    const body = patchBody.parse(req.body ?? {});
+    const row = await updatePlayerWaypoint(req.player!.id, id, body);
+    enrich({ map_marker: "player_updated", marker_id: id });
+    res.json({ waypoint: presentMarker(row) });
+  })
+);
+
 mapMarkersRouter.get(
   "/map/nation-pois",
   requireSession,
@@ -124,5 +151,21 @@ mapMarkersRouter.delete(
     await deleteNationPoi(townName, id);
     enrich({ map_marker: "nation_dismissed", marker_id: id, town: townName });
     res.json({ ok: true });
+  })
+);
+
+mapMarkersRouter.patch(
+  "/map/nation-pois/:id",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const id = req.params.id!;
+    if (!z.string().uuid().safeParse(id).success) {
+      throw new AppError(400, "invalid id", "invalid_id");
+    }
+    const body = patchBody.parse(req.body ?? {});
+    const { townName } = await assertCanEditNation(req.player!.id, req.player!.username);
+    const row = await updateNationPoi(townName, id, body);
+    enrich({ map_marker: "nation_updated", marker_id: id, town: townName });
+    res.json({ poi: presentMarker(row) });
   })
 );

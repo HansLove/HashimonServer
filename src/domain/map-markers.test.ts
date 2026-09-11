@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   homeblockToWorld,
   pickWorldDestination,
+  presentMarker,
   BLOCK_SIZE,
+  type MapMarkerRow,
 } from "@/domain/map-markers";
 
 describe("homeblockToWorld", () => {
@@ -66,5 +68,41 @@ describe("pickWorldDestination", () => {
     });
     assert.match(dest.sector, /^xz:/);
     assert.equal(dest.y, 12);
+  });
+});
+
+/**
+ * Contract for GET /internal/luanti-map-markers → hashimon_map_sync.
+ * Manual check: place a WP on /map → wait ≤30s in-game → discovery_maps shows api_<uuid>.
+ */
+describe("presentMarker Luanti contract", () => {
+  it("exposes id, x/y/z, label, colorIndex, kind for discovery_maps upsert", () => {
+    const row: MapMarkerRow = {
+      id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      kind: "player",
+      owner_player_id: "11111111-2222-4333-8444-555555555555",
+      town_name: null,
+      hashimon_id: null,
+      x: 120.5,
+      y: 8,
+      z: -64,
+      label: "WP 120,-64",
+      color_index: 2,
+      status: "active",
+      meta: {},
+      created_at: "2026-01-01T00:00:00.000Z",
+      completed_at: null,
+    };
+    const m = presentMarker(row);
+    assert.equal(m.id, row.id);
+    assert.equal(m.kind, "player");
+    assert.equal(m.x, 120.5);
+    assert.equal(m.y, 8);
+    assert.equal(m.z, -64);
+    assert.equal(m.label, "WP 120,-64");
+    assert.equal(m.colorIndex, 2);
+    assert.ok("meta" in m);
+    // Luanti reads camelCase colorIndex (see hashimon_map_sync apply_markers).
+    assert.equal((m as { color_index?: unknown }).color_index, undefined);
   });
 });

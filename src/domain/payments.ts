@@ -11,6 +11,7 @@ import { isUniqueViolation, query, withTransaction } from "@/db/pool";
 import { AppError } from "@/http/errors";
 import { enrich } from "@/http/wide-event";
 import { audit } from "@/domain/audit";
+import { accrueCommission } from "@/domain/affiliates";
 import { planFor } from "@/domain/credit-plans";
 
 //The payment book. Every transition here is decided by the server: the client's UI
@@ -62,6 +63,7 @@ export function presentPayment(row: PaymentRow) {
     address: row.address,
     bip21: row.bip21,
     checkoutLink: row.checkout_link,
+    createdAt: row.created_at.toISOString(),
     expiresAt: row.expires_at.toISOString(),
     settledAt: row.settled_at ? row.settled_at.toISOString() : null,
   };
@@ -304,6 +306,12 @@ async function settleAndCredit(invoiceId: string): Promise<PaymentRow | null> {
         amountUsd: payment.amount_usd,
       },
     });
+    //La comisión del afiliado viaja en esta misma transacción, y por la misma
+    //razón que el audit: un cobro liquidado cuya comisión no quedó anotada es
+    //dinero que alguien ganó y nadie registró. No puede fallar por lógica — sin
+    //referido simplemente no inserta nada — así que no añade ningún camino nuevo
+    //por el que un pago real se quede sin acreditar.
+    await accrueCommission(client, payment.order_id);
     enrich({ credits_granted: payment.credits, credits_after: credited.rows[0]?.credits });
     return payment;
   });

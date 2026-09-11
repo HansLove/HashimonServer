@@ -85,6 +85,7 @@ export interface TownClaimsRow {
   home_z: number | null;
   blocks: [number, number, number][];
   members: TownMember[];
+  invites: string[];
 }
 
 /** One town in the whole-world snapshot pushed by the Luanti sync mod. */
@@ -98,6 +99,7 @@ export interface TownClaimInput {
   homeZ: number | null;
   blocks: [number, number, number][];
   members: TownMember[];
+  invites: string[];
 }
 
 /** Replace the entire town snapshot in one transaction: upsert every town in the push
@@ -114,8 +116,8 @@ export async function replaceTownClaims(towns: TownClaimInput[]): Promise<number
     for (const t of towns) {
       await query(
         `INSERT INTO town_claims
-           (town_name, block_count, member_count, mayor, home_x, home_y, home_z, blocks, members, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, now())
+           (town_name, block_count, member_count, mayor, home_x, home_y, home_z, blocks, members, invites, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, now())
          ON CONFLICT (town_name) DO UPDATE SET
            block_count  = EXCLUDED.block_count,
            member_count = EXCLUDED.member_count,
@@ -125,9 +127,10 @@ export async function replaceTownClaims(towns: TownClaimInput[]): Promise<number
            home_z       = EXCLUDED.home_z,
            blocks       = EXCLUDED.blocks,
            members      = EXCLUDED.members,
+           invites      = EXCLUDED.invites,
            updated_at   = now()`,
         [t.name, t.blockCount, t.memberCount, t.mayor, t.homeX, t.homeY, t.homeZ,
-         JSON.stringify(t.blocks), JSON.stringify(t.members)],
+         JSON.stringify(t.blocks), JSON.stringify(t.members), JSON.stringify(t.invites ?? [])],
         client
       );
     }
@@ -138,7 +141,8 @@ export async function replaceTownClaims(towns: TownClaimInput[]): Promise<number
 /** Every town's claimed footprint, for the public cadastral map. */
 export async function listTownClaims(): Promise<TownClaimsRow[]> {
   const res = await query<TownClaimsRow>(
-    `SELECT town_name, block_count, mayor, home_x, home_y, home_z, blocks, members
+    `SELECT town_name, block_count, mayor, home_x, home_y, home_z, blocks, members,
+            COALESCE(invites, '[]'::jsonb) AS invites
        FROM town_claims
       ORDER BY block_count DESC, town_name ASC`
   );
@@ -209,13 +213,204 @@ export interface TownActionRow {
   town_name: string;
   actor: string;
   target: string;
-  op: "add" | "remove";
+  op: string;
   rank: string;
 }
 
-/** Queue a rank change requested from the web. The route has already checked the actor
- *  is the town's mayor; the world re-validates before applying, so this is a request,
- *  not authority. */
+export type TownActionOp =
+  | "add"
+  | "remove"
+  | "invite"
+  | "invite_revoke"
+  | "invite_accept"
+  | "invite_deny"
+  | "kick"
+  | "leave"
+  | "claim";
+
+/** Max mapblocks one town may queue/apply via web claim per UTC day. */
+export const TOWN_CLAIM_DAILY_LIMIT = 365;
+
+/** One town's footprint row (for soft claim checks). */
+export async function getTownClaimsByName(townName: string): Promise<TownClaimsRow | null> {
+  const res = await query<TownClaimsRow>(
+    `SELECT town_name, block_count, mayor, home_x, home_y, home_z, blocks, members,
+            COALESCE(invites, '[]'::jsonb) AS invites
+       FROM town_claims
+      WHERE town_name = $1`,
+    [townName]
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Encode mapblock coords into town_actions.target. */
+export function formatClaimTarget(bx: number, by: number, bz: number): string {
+  return `${bx},${by},${bz}`;
+}
+
+/** Soft adjacency: orthogonal Manhattan distance 1 in mapblock space (Towny rule). */
+export function mapblockBordersTown(
+  bx: number,
+  by: number,
+  bz: number,
+  blocks: [number, number, number][]
+): boolean {
+  for (const [ox, oy, oz] of blocks) {
+    if (Math.abs(bx - ox) + Math.abs(by - oy) + Math.abs(bz - oz) === 1) return true;
+  }
+  return false;
+}
+
+/** True if this mapblock is already in the town's projected footprint. */
+export function mapblockOwnedByTown(
+  bx: number,
+  by: number,
+  bz: number,
+  blocks: [number, number, number][]
+): boolean {
+  return blocks.some(([ox, oy, oz]) => ox === bx && oy === by && oz === bz);
+}
+
+/** Claims already used today (UTC) for a town — pending + applied count toward the cap. */
+export async function countTownClaimsToday(townName: string): Promise<number> {
+  const res = await query<{ n: string }>(
+    `SELECT COUNT(*)::text AS n FROM town_actions
+      WHERE town_name = $1
+        AND op = 'claim'
+        AND status IN ('pending', 'applied')
+        AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+                               AT TIME ZONE 'UTC'`,
+    [townName]
+  );
+  return Number(res.rows[0]?.n ?? 0);
+}
+
+export async function getTownClaimQuota(townName: string): Promise<{
+  used: number;
+  limit: number;
+  remaining: number;
+}> {
+  const used = await countTownClaimsToday(townName);
+  const limit = TOWN_CLAIM_DAILY_LIMIT;
+  return { used, limit, remaining: Math.max(0, limit - used) };
+}
+
+/** True if a pending claim already targets this mapblock for the town. */
+export async function hasPendingClaimAt(
+  townName: string,
+  target: string
+): Promise<boolean> {
+  const res = await query<{ n: string }>(
+    `SELECT COUNT(*)::text AS n FROM town_actions
+      WHERE town_name = $1 AND op = 'claim' AND status = 'pending' AND target = $2`,
+    [townName, target]
+  );
+  return Number(res.rows[0]?.n ?? 0) > 0;
+}
+
+/** Parse "bx,by,bz" from town_actions.target. */
+export function parseClaimTarget(target: string): [number, number, number] | null {
+  const m = /^(-?\d+),(-?\d+),(-?\d+)$/.exec(target.trim());
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/**
+ * Claim blocks that should paint on the cadastral map even before town_claims
+ * catches up: still pending, or applied in the last 2 minutes (push may lag).
+ */
+export async function listVisibleClaimOverlays(): Promise<
+  { townName: string; block: [number, number, number]; status: "pending" | "applied" }[]
+> {
+  const res = await query<{ town_name: string; target: string; status: string }>(
+    `SELECT town_name, target, status FROM town_actions
+      WHERE op = 'claim'
+        AND (
+          status = 'pending'
+          OR (status = 'applied' AND applied_at >= now() - interval '2 minutes')
+        )
+      ORDER BY id ASC`
+  );
+  const out: {
+    townName: string;
+    block: [number, number, number];
+    status: "pending" | "applied";
+  }[] = [];
+  for (const row of res.rows) {
+    const block = parseClaimTarget(row.target);
+    if (!block) continue;
+    out.push({
+      townName: row.town_name,
+      block,
+      status: row.status === "pending" ? "pending" : "applied",
+    });
+  }
+  return out;
+}
+
+/** Merge pending/recent claim overlays into the cadastral snapshot so F5 paints. */
+export function mergeClaimOverlaysIntoTowns(
+  towns: ReturnType<typeof presentTownClaims>,
+  overlays: { townName: string; block: [number, number, number] }[]
+): ReturnType<typeof presentTownClaims> {
+  if (overlays.length === 0) return towns;
+  const byTown = new Map<string, [number, number, number][]>();
+  for (const o of overlays) {
+    const key = o.townName.toLowerCase();
+    const list = byTown.get(key) ?? [];
+    list.push(o.block);
+    byTown.set(key, list);
+  }
+  return towns.map((t) => {
+    const extra = byTown.get(t.townName.toLowerCase());
+    if (!extra || extra.length === 0) return t;
+    const have = new Set(t.blocks.map(([x, y, z]) => `${x}:${y}:${z}`));
+    const added: [number, number, number][] = [];
+    for (const b of extra) {
+      const k = `${b[0]}:${b[1]}:${b[2]}`;
+      if (have.has(k)) continue;
+      have.add(k);
+      added.push(b);
+    }
+    if (added.length === 0) return t;
+    const blocks = [...t.blocks, ...added];
+    return { ...t, blocks, blockCount: Math.max(t.blockCount, blocks.length) };
+  });
+}
+
+/** Pending claim blocks for one town (authenticated map merge / poll). */
+export async function listPendingClaimsForTown(
+  townName: string
+): Promise<[number, number, number][]> {
+  const res = await query<{ target: string }>(
+    `SELECT target FROM town_actions
+      WHERE town_name = $1 AND op = 'claim' AND status = 'pending'
+      ORDER BY id ASC`,
+    [townName]
+  );
+  const blocks: [number, number, number][] = [];
+  for (const row of res.rows) {
+    const b = parseClaimTarget(row.target);
+    if (b) blocks.push(b);
+  }
+  return blocks;
+}
+
+/** Queue a political action from the web. The world re-validates before applying. */
+export async function enqueueTownAction(input: {
+  townName: string;
+  actor: string;
+  target: string;
+  op: TownActionOp;
+  rank?: string;
+}): Promise<void> {
+  await query(
+    `INSERT INTO town_actions (town_name, actor, target, op, rank) VALUES ($1, $2, $3, $4, $5)`,
+    [input.townName, input.actor, input.target, input.op, input.rank ?? ""]
+  );
+}
+
+/** @deprecated prefer enqueueTownAction — kept for call sites that only do comayor. */
 export async function enqueueRankAction(input: {
   townName: string;
   actor: string;
@@ -223,10 +418,7 @@ export async function enqueueRankAction(input: {
   op: "add" | "remove";
   rank: string;
 }): Promise<void> {
-  await query(
-    `INSERT INTO town_actions (town_name, actor, target, op, rank) VALUES ($1, $2, $3, $4, $5)`,
-    [input.townName, input.actor, input.target, input.op, input.rank]
-  );
+  await enqueueTownAction(input);
 }
 
 /** Pending actions for the Luanti poller to apply. */
@@ -253,4 +445,33 @@ export async function resolveTownAction(
       WHERE id = $1 AND status = 'pending'`,
     [id, result, detail ?? null]
   );
+}
+
+/** Invites sent by one town (from the Towny projection). */
+export async function getTownInvites(townName: string): Promise<string[]> {
+  const res = await query<{ invites: string[] }>(
+    `SELECT COALESCE(invites, '[]'::jsonb) AS invites FROM town_claims WHERE town_name = $1`,
+    [townName]
+  );
+  return res.rows[0]?.invites ?? [];
+}
+
+/** Towns that have invited this luanti username (case-insensitive). */
+export async function listInvitesForPlayer(username: string): Promise<string[]> {
+  const res = await query<{ town_name: string }>(
+    `SELECT town_name FROM town_claims
+      WHERE EXISTS (
+        SELECT 1 FROM jsonb_array_elements_text(COALESCE(invites, '[]'::jsonb)) AS inv(name)
+         WHERE lower(inv.name) = lower($1)
+      )
+      ORDER BY town_name ASC`,
+    [username]
+  );
+  return res.rows.map((r) => r.town_name);
+}
+
+/** True if username is mayor or comayor in the town roster. */
+export function memberIsOfficer(members: TownMember[], username: string): boolean {
+  const m = members.find((x) => x.name.toLowerCase() === username.toLowerCase());
+  return m?.rank === "mayor" || m?.rank === "comayor";
 }

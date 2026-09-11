@@ -15,6 +15,10 @@ const registerSchema = z.object({
   dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "dob must be YYYY-MM-DD"),
   publicKey: z.string().min(66).max(66).optional(),
   custody: z.enum(["server_encrypted", "player"]).optional(),
+  //Código de afiliado leído del ?ref= de la URL. Se valida contra la tabla en
+  //registerOwner, no aquí: un código inexistente no es un error de forma del
+  //cuerpo, es un enlace viejo, y debe registrar igual.
+  ref: z.string().max(40).optional(),
 });
 
 authRouter.post(

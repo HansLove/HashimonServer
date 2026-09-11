@@ -44,6 +44,13 @@ ALTER TABLE players ADD COLUMN IF NOT EXISTS genesis_element text;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_version   smallint;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_set_at    timestamptz;
 
+-- Last known world position (checkpoint) pushed from Luanti on leave / every ~5 min.
+-- Not real-time: the website map shows this snapshot as "you were here".
+ALTER TABLE players ADD COLUMN IF NOT EXISTS last_x double precision;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS last_y double precision;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS last_z double precision;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS last_pos_at timestamptz;
+
 -- Per-player territory PROJECTION, pushed from the Luanti world (Towny mod).
 -- Not authoritative ledger state — a read cache of "which town / how many blocks"
 -- so the website can show a player their holdings without querying Luanti. Keyed
@@ -82,24 +89,30 @@ CREATE TABLE IF NOT EXISTS town_claims (
 ALTER TABLE town_claims ADD COLUMN IF NOT EXISTS home_y integer;
 ALTER TABLE town_claims ADD COLUMN IF NOT EXISTS members jsonb NOT NULL DEFAULT '[]'::jsonb;
 
--- Political actions requested from the WEBSITE (e.g. the mayor promoting a member to
--- co-mayor) that the Luanti world must carry out. The web enqueues a 'pending' row
--- after checking the requester is the town's mayor; the world polls, RE-VALIDATES
--- against live Towny (the source of truth), applies the rank flag, and acks. A queue,
--- not authority — Towny decides what actually holds.
+-- Political actions requested from the WEBSITE that the Luanti world must carry out.
+-- The web enqueues a 'pending' row after auth checks; the world polls, RE-VALIDATES
+-- against live Towny (the source of truth), applies, and acks. A queue, not authority.
+-- op: 'add'|'remove' (rank) | 'invite'|'invite_revoke'|'invite_accept'|'invite_deny'|'kick'|'leave'
+-- rank: 'comayor' for rank ops; empty string for membership ops.
+-- Political + claim queue: website enqueues, Luanti re-validates and acks.
+-- ops: add|remove|invite|invite_revoke|invite_accept|invite_deny|kick|leave|claim
+-- For claim, target is mapblock "bx,by,bz" (not a player name).
 CREATE TABLE IF NOT EXISTS town_actions (
   id          bigserial PRIMARY KEY,
   town_name   text NOT NULL,
-  actor       text NOT NULL,        -- luanti username who requested (must be mayor)
-  target      text NOT NULL,        -- member being re-ranked
-  op          text NOT NULL,        -- 'add' | 'remove'
-  rank        text NOT NULL,        -- 'comayor'
+  actor       text NOT NULL,        -- luanti username who requested
+  target      text NOT NULL,        -- member / invitee / actor / "bx,by,bz" for claim
+  op          text NOT NULL,
+  rank        text NOT NULL DEFAULT '',
   status      text NOT NULL DEFAULT 'pending',  -- pending | applied | rejected
   detail      text,
   created_at  timestamptz NOT NULL DEFAULT now(),
   applied_at  timestamptz
 );
 CREATE INDEX IF NOT EXISTS town_actions_pending_idx ON town_actions(status) WHERE status = 'pending';
+
+-- Pending invites projected from Towny (names of invitees). Replaced with each towns push.
+ALTER TABLE town_claims ADD COLUMN IF NOT EXISTS invites jsonb NOT NULL DEFAULT '[]'::jsonb;
 
 -- Alliances between towns (Towny has no nations/alliances of its own — this is the
 -- meta-diplomacy layer the website owns). A pair is stored canonically (town_a < town_b)
@@ -749,3 +762,183 @@ CREATE TABLE IF NOT EXISTS wolker_genesis (
   count      integer NOT NULL,
   at         timestamptz NOT NULL DEFAULT now()
 );
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Afiliación energética (piloto)
+--
+-- Alcance deliberado: 3-5 afiliados, tasa fija, corte manual los viernes. No hay
+-- auto-alta (un afiliado se da de alta con un INSERT), no hay panel, y el pago
+-- sale a mano en Bitcoin — sólo se anota el txid. Todo lo que falta aquí falta
+-- a propósito: construir el sistema completo antes de saber si alguien vende
+-- es exactamente la nave espacial que no queremos.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS affiliates (
+  code        text PRIMARY KEY,
+  -- Un afiliado normalmente también es jugador, pero no tiene por qué serlo:
+  -- se le paga a una dirección de Bitcoin, no a un saldo interno.
+  player_id   uuid REFERENCES players(id) ON DELETE SET NULL,
+  -- Basis points, entero: 1500 = 15%. Nunca un float — el dinero no se redondea
+  -- dos veces. Vive en la fila para poder cambiarlo por afiliado sin tocar código.
+  rate_bps    integer NOT NULL DEFAULT 1500 CHECK (rate_bps BETWEEN 0 AND 10000),
+  btc_address text,
+  active      boolean NOT NULL DEFAULT true,
+  note        text,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- El código viaja en una URL y lo teclea gente: DANIEL y daniel son el mismo.
+-- Mismo patrón que players_username_lower_idx.
+CREATE UNIQUE INDEX IF NOT EXISTS affiliates_code_lower_idx ON affiliates (lower(code));
+
+-- Quién trajo a quién. Se escribe una sola vez, en el registro, y no se toca
+-- nunca más: reasignar un referido después es reescribir a quién se le debe
+-- dinero por compras que ya ocurrieron.
+ALTER TABLE players ADD COLUMN IF NOT EXISTS referred_by text REFERENCES affiliates(code);
+ALTER TABLE players ADD COLUMN IF NOT EXISTS referred_at timestamptz;
+CREATE INDEX IF NOT EXISTS players_referred_by_idx
+  ON players (referred_by) WHERE referred_by IS NOT NULL;
+
+-- Una comisión por cobro liquidado.
+--
+-- order_id es UNIQUE por la misma razón por la que los créditos se otorgan una
+-- sola vez: BTCPay reentrega webhooks, y una comisión devengada dos veces es
+-- dinero regalado. La garantía es el índice, no un `if`.
+--
+-- rate_bps se congela en la fila: bajar la tasa del 15% mañana no revalúa lo ya
+-- devengado, igual que payments congela sku/credits/amount_usd.
+CREATE TABLE IF NOT EXISTS commissions (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id    text NOT NULL REFERENCES payments(order_id) ON DELETE CASCADE,
+  code        text NOT NULL REFERENCES affiliates(code),
+  buyer_id    uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  amount_usd  numeric(10,2) NOT NULL CHECK (amount_usd >= 0),
+  rate_bps    integer NOT NULL,
+  status      text NOT NULL DEFAULT 'accrued' CHECK (status IN ('accrued', 'paid')),
+  -- El comprobante del viernes. Sin automatizar: se pega el txid a mano.
+  payout_txid text,
+  paid_at     timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS commissions_accrued_idx
+  ON commissions (code) WHERE status = 'accrued';
+
+-- Cooldown de crianza (Fase 2). Va en la fila del wolker y no en una tabla aparte porque se
+-- lee en el mismo SELECT que el tick ya hace para comer.
+ALTER TABLE wolkers ADD COLUMN IF NOT EXISTS last_bred_at timestamptz;
+
+-- Lo que sólo el mundo sabe del techo de población: cuántas camas hay construidas dentro del
+-- claim y dónde está el Hogar. El tercer término del techo (bloques maduros) sale de
+-- town_claims, que ya se empuja. Sin Hogar no hay dónde nacer: `hearth_*` en NULL significa
+-- que el town todavía no ha decidido dónde asentar a su gente.
+CREATE TABLE IF NOT EXISTS town_capacity (
+  town_name     text PRIMARY KEY REFERENCES town_claims(town_name) ON DELETE CASCADE,
+  beds          integer NOT NULL DEFAULT 0,
+  hearth_x      integer,
+  hearth_y      integer,
+  hearth_z      integer,
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+-- Fase 3. `low_morale_ticks` es lo que convierte "estar descontento" en "irse": hacen falta
+-- dos ticks seguidos por debajo del umbral, así que un mal rato no vacía un pueblo.
+ALTER TABLE wolkers ADD COLUMN IF NOT EXISTS low_morale_ticks smallint NOT NULL DEFAULT 0;
+
+-- Ejércitos (docs/ARMIES_V1.md). La capa Risk: fichas que se acumulan con el tiempo, se
+-- colocan en chunks propios y se mueven un número limitado de chunks por turno.
+--
+-- La leva no se compra: la produce la POBLACIÓN. Sin wolkers no hay ejército, y por eso
+-- proteger la frontera y alimentar al pueblo son la misma partida.
+CREATE TABLE IF NOT EXISTS army_levies (
+  town_name  text PRIMARY KEY REFERENCES town_claims(town_name) ON DELETE CASCADE,
+  stock      numeric(10,3) NOT NULL DEFAULT 0,   -- levas sin gastar
+  spent      integer NOT NULL DEFAULT 0,          -- histórico, para el panel
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Una ficha = una compañía. Vive en un mapblock (chunk), que es la misma rejilla que usa
+-- Towny para los claims, así que "mover una ficha" y "reclamar terreno" hablan el mismo
+-- idioma sin conversiones.
+CREATE TABLE IF NOT EXISTS army_units (
+  id         bigserial PRIMARY KEY,
+  town_name  text NOT NULL REFERENCES town_claims(town_name) ON DELETE CASCADE,
+  kind       text NOT NULL CONSTRAINT army_units_kind CHECK (kind IN ('milicia', 'linea', 'incursores')),
+  bx         integer NOT NULL,
+  by         integer NOT NULL,
+  bz         integer NOT NULL,
+  moved_at   timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS army_units_town_idx ON army_units (town_name);
+CREATE INDEX IF NOT EXISTS army_units_block_idx ON army_units (bx, bz);
+
+-- Cada batalla queda escrita con su semilla: cualquiera puede recomputar el resultado y
+-- comprobar que el servidor no puso el dedo en la balanza. Verificación, no confianza.
+CREATE TABLE IF NOT EXISTS battles (
+  id          bigserial PRIMARY KEY,
+  bx          integer NOT NULL,
+  by          integer NOT NULL,
+  bz          integer NOT NULL,
+  attacker    text NOT NULL,
+  defender    text,
+  seed        char(64) NOT NULL,
+  roll        numeric(9,8) NOT NULL,
+  attack_power  numeric(10,3) NOT NULL,
+  defense_power numeric(10,3) NOT NULL,
+  winner      text NOT NULL,
+  detail      jsonb NOT NULL DEFAULT '{}'::jsonb,
+  at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS battles_recent_idx ON battles (at DESC);
+
+-- Doctrina: qué hace tu ejército cuando no estás. El valor por defecto es 'defensiva' y no
+-- 'manual' a propósito — la mayoría de la gente no quiere jugar a un Risk todos los días,
+-- quiere que su nación siga viva mientras mira. Una nación sin alcalde presente se defiende
+-- sola; lo que NUNCA hace sola es declararle la guerra a un vecino.
+CREATE TABLE IF NOT EXISTS army_doctrine (
+  town_name  text PRIMARY KEY REFERENCES town_claims(town_name) ON DELETE CASCADE,
+  doctrine   text NOT NULL DEFAULT 'defensiva'
+             CONSTRAINT army_doctrine_kind CHECK (doctrine IN ('manual', 'defensiva', 'equilibrada', 'expansiva')),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Afiliación en dos niveles (portal de afiliados)
+--
+-- Modelo de introducing broker: un superafiliado recluta sub-afiliados y les
+-- cede parte de SU tasa. Daniel al 15% que le da 10% a alguien se queda con 5%
+-- de lo que ese alguien traiga. Cederle los 15 completos es legal y le deja 0 —
+-- es su decisión, no un error que haya que impedir.
+--
+-- Deliberadamente DOS niveles, no N. Con N el cálculo se vuelve una recursión
+-- por la cadena de padres y el corte del viernes deja de ser legible de un
+-- vistazo; con 3-5 personas no compra nada.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Quién reclutó a este afiliado. NULL = afiliado raíz (contrato directo con la casa).
+ALTER TABLE affiliates ADD COLUMN IF NOT EXISTS parent_code text REFERENCES affiliates(code);
+
+-- Sólo los raíz reclutan. Es lo que mantiene el árbol en dos niveles: un
+-- sub-afiliado con can_recruit no podría cobrar override de su propio sub sin
+-- volver esto recursivo.
+ALTER TABLE affiliates ADD COLUMN IF NOT EXISTS can_recruit boolean NOT NULL DEFAULT false;
+
+-- Nombre para mostrar en el portal. El código es el identificador; esto es
+-- cortesía para que un superafiliado reconozca a su gente.
+ALTER TABLE affiliates ADD COLUMN IF NOT EXISTS display_name text;
+
+CREATE INDEX IF NOT EXISTS affiliates_parent_idx
+  ON affiliates (parent_code) WHERE parent_code IS NOT NULL;
+
+-- De qué línea vino esta comisión. En una comisión directa es el propio `code`;
+-- en un override es el código del sub que trajo al cliente — que es justo lo que
+-- el superafiliado necesita ver para saber cuál de los suyos está produciendo.
+ALTER TABLE commissions ADD COLUMN IF NOT EXISTS source_code text REFERENCES affiliates(code);
+
+-- Un pago ahora paga hasta a DOS personas (el directo y su padre), así que la
+-- unicidad ya no puede ser sólo el pago: es el par pago+beneficiario. Sigue
+-- siendo lo que hace que una reentrega de webhook no pague dos veces.
+ALTER TABLE commissions DROP CONSTRAINT IF EXISTS commissions_order_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS commissions_order_code_idx
+  ON commissions (order_id, code);

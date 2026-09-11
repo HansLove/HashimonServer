@@ -64,6 +64,17 @@ test("the prompt never offers services", () => {
   assert.doesNotMatch(p, /ayudas con código/);
 });
 
+test("the prompt forbids narrating body actions", () => {
+  const p = buildSystemPrompt({
+    name: "Petunia",
+    dna: "7e28a75eb22969289e885969b089bd3025e2a8b4a578405fceaae177ea321278",
+    spirit: "guardian", element: "fuego", stage: 4,
+    wellbeing: wellbeingOf(rowAll(0)), keepsakes: [],
+  });
+  assert.match(p, /NUNCA narras tu cuerpo/);
+  assert.match(p, /asteriscos/);
+});
+
 test("the same DNA always produces the same prompt", () => {
   const input = {
     name: "Petunia",
