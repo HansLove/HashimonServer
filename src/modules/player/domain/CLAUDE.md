@@ -28,12 +28,11 @@ the DB here is the only password store the engine ever sees.
 **Internal:**
 - `@/modules/hashimon/domain/hashimons` (`emit`, `isGenesisSpecies`) — `registerOwner` mints the starter creature through the same emission path everything else uses.
 - `@/modules/core/db/pool` (`query`, `withTransaction`) — registration and claims are transactional.
-- `@/modules/core/domain/audit` — identity mutations record themselves.
+- `@/modules/affiliate/domain/affiliates` (`resolveAffiliateCode`) — `registerOwner` resolves the optional `ref` against the affiliate table before inserting, so `players.referred_by` only ever holds an existing, active code; an invalid one becomes `null` and registration carries on.
 
 **External:**
 - `argon2` — password hashing for `password_hash` (registerOwner/loginOwner/claimLuantiGuest). It is unrelated to `luanti_password`, whose format is dictated by the engine (SRP-6a verifier); `loginOwner` verifies that one itself via `luantiSrpVerify` when `password_hash` is absent, rather than treating it as an opaque hash.
 - `@noble/secp256k1` — key generation/validation matching the same curve the client/wallet uses.
 
 ## Common Pitfalls
-- Adding a mutation to `players` without an `audit()` call breaks the append-only trail other tooling assumes exists for every state change.
 - Treating `luanti_password` as an opaque hash. It is an SRP verifier with its own salt; verifying it means recomputing through `luantiSrpVerify`, never comparing strings.

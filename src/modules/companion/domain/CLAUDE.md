@@ -16,7 +16,7 @@ servicios."*
 - `chat.ts::speak` — the whole turn: credit check, LLM call, periodic memory extraction, persistence.
 - `chat.ts::care` — records that a specific care (hunger/company/exercise/world) was just attended.
 - `chat.ts::loadState` — read-only state snapshot (wellbeing, keepsakes, turns used, credits) used both before and after a turn.
-- `anthropic.ts::askModel` — the only function that talks to an LLM provider.
+- `anthropic.ts::askModel` / `anthropic.ts::askModelStructured` — the only two functions that talk to an LLM provider. `askModelStructured` (single-shot, cached system prefix, JSON-schema output) has no caller in this module: `alen/domain/` and `territory/domain/wolker-council.ts` use it, so a change to it reaches both.
 
 ## Key Files
 
@@ -36,10 +36,12 @@ servicios."*
 - **Memory extraction happens AFTER the reply is already computed and returned to the player** — if it fails, the player still gets their conversation; only the memory is lost (caught via the `SkipMemory` sentinel-error pattern).
 - **`speak()`'s DB writes (turn insert, credit debit, memory insert+trim, `talked_at` bump) all happen in one `withTransaction`** — talking to the companion is itself the "company" care event, so it always bumps `talked_at` as part of the same atomic write.
 - **Keepsakes are read oldest-to-newest** (`.reverse()` on a `DESC` query) so the prompt sees them in the order they accumulated, not most-recent-first.
+- **Feeding spends a real croqueta; the other cares are free.** `care('hunger')` calls `mining::consumeCroqueta` inside its own transaction and throws 409 `no_food` when the creature has none — the same `pow_yield` pantry a town's wolkers eat from.
 
 ## Dependencies
 
 **Internal:**
+- `@/modules/mining/domain/mining` (`consumeCroqueta`, `croquetaBalance`) — the Hashi-croqueta stock behind `care('hunger')` and `loadState`.
 - `@/modules/core/core` (`Dna.pick`) — temperament derivation must match the client's compiled DNA logic bit-for-bit; core.test.ts is the parity guard.
 - `@/modules/core/core/birth-identity` (`spiritByKey`, `SpiritKey`) — spirit archetype text injected into the prompt for Genesis V2 creatures.
 - `@/modules/core/db/pool` — `chat.ts` is the only file here touching Postgres directly.
@@ -49,7 +51,7 @@ servicios."*
 - None beyond the runtime `fetch` to Anthropic's API — no SDK, so retry/backoff and error classification (`AnthropicError.retryable`, true for 429/5xx) are hand-rolled in `anthropic.ts`.
 
 **Environment Variables:**
-- `ANTHROPIC_API_KEY` — missing → `askModel` throws a non-retryable 503 immediately; companion chat is fully disabled (`anthropicConfigured()` guards callers).
+- `ANTHROPIC_API_KEY` — missing → `askModel` and `askModelStructured` throw a non-retryable 503 immediately; companion chat is fully disabled (`anthropicConfigured()` guards callers), while Alen and the wolker council fall back to their own rules.
 - `ANTHROPIC_WORKSPACE_ID` — only needed for identity-linked/multi-workspace keys; omit for single-workspace keys.
 
 ## Failure Modes

@@ -34,8 +34,9 @@ cancelled`, the last four terminal. **The client runs no state machine**; its UI
 which the route turns into 409 `payment_pending` *with the live charge in the body*; and
 `applyWebhook`'s `UPDATE … WHERE status <> 'settled' RETURNING *` is what makes crediting
 once-only — BTCPay redelivers (`isRedelivery`), so a repeat is the normal case, and the
-credit + `audit()` ride in one `withTransaction`. Same conditional-transition shape as
-`claimSelfCustody`.
+credit, `audit()` and the affiliate commission (`affiliate/domain/affiliates.ts::accrueCommission`,
+a no-op for an unreferred player) ride in one `withTransaction`. Same conditional-transition
+shape as `claimSelfCustody`.
 
 **Cancel is `waiting`-only, and settling ignores cancel.** `cancelPayment` refuses a
 `confirming` charge with 409 `payment_in_flight` — coins are already on the wire, so

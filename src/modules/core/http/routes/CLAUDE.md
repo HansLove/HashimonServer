@@ -11,9 +11,12 @@ the error-mapping details — not repeated here.
 
 - **health.ts** — liveness probe; no session, no domain call.
 - **internal.ts** — the Luanti bridge, gated by `X-Luanti-Secret`
-  (`LUANTI_SERVER_SECRET`) rather than `requireSession`. It spans several domains at
-  once — identity (`luanti-register`, `luanti-auth`) and ownership (`luanti-bind`) —
-  which is why it stays here instead of moving into `player/`.
+  (`LUANTI_SERVER_SECRET`) rather than `requireSession`. It is the world's one channel
+  into every module — identity (`luanti-register`, `luanti-auth`, `luanti-player-position`),
+  ownership (`luanti-bind`), territory (`luanti-territory`, `luanti-towns`, town actions,
+  alliances, and the wolker census and council under `luanti-wolkers*`), mining
+  (`luanti-vibing-towers`), map (`luanti-map-tiles`, `luanti-map-markers`) and Alen
+  (`luanti-alen-*`) — which is why it stays here instead of moving into any one of them.
 
 ## Business Logic
 

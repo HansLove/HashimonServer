@@ -33,9 +33,9 @@ pnpm start             # node dist/server.js (run build first)
 pnpm migrate:dev       # applies src/modules/core/db/schema.sql directly — USE THIS in development
 pnpm migrate           # node dist/modules/core/db/migrate.js — applies dist/modules/core/db/schema.sql (idempotent)
 pnpm typecheck         # tsc --noEmit
-pnpm test              # node --import tsx --test — core, auth, payments, incubation,
-                       # wide-event suites
-                       # (the auth and payments suites need a live Postgres)
+pnpm test              # node --import tsx --test over the suites listed in package.json
+                       # (the DB-backed ones — auth, payments, affiliates, incubation,
+                       # food, wolkers, armies — need a live Postgres)
 ```
 
 Run a single test file directly: `node --import tsx --test src/modules/core/core/core.test.ts`
@@ -68,32 +68,43 @@ src/modules/
     core/       The Caos Core — versioned, deterministic ruleset shared with the
                 client. sha256.ts (byte-identical to client's window.SHA256), dna.ts
                 (DNA derivation), pow.ts (leadingZeroBits, share hashing, rank/stage
-                math, verifyShare/verifyJobShare). Imported to VERIFY, not to decide —
-                the client runs an equivalent copy to play. core.test.ts guards parity.
+                math, verifyShare/verifyJobShare, evaluateYield), yield-map.ts
+                (zona(x,z) — the tier a map coordinate yields, byte-identical to the
+                web's copy). Imported to VERIFY, not to decide — the client runs an
+                equivalent copy to play. core.test.ts guards parity.
     db/         pool.ts (pg pool + withTransaction), schema.sql (source of truth for
                 tables), migrate.ts (applies schema.sql, idempotent — no migrations).
     http/       app.ts (express wiring), auth.ts (requireSession bearer gate),
                 errors.ts (AppError + errorMiddleware), wide-event.ts,
                 luanti-secret.ts, routes/ (health.ts + internal.ts — the only two
                 routers no single domain owns).
-    domain/     audit.ts, the append-only log written by payments and incubation.
+    domain/     audit.ts, the append-only log written by hashimon, mining, payments
+                and incubation.
     config.ts   Env var parsing — single source for all runtime config.
     logger.ts   pino setup; `redact` is the secrets backstop.
   hashimon/     Core subdomain — emission/birth, inventory, present() derived view.
                 data/species.ts is the registry whose keys gate emission.
-  mining/       Core subdomain — PoW job issuance + share submission, block-template.ts,
-                bitcoin-address.ts.
+  mining/       Core subdomain — PoW job issuance + share submission, the yield harvest
+                (pow_yield: the Hashi-croquetas creatures and towns both eat), vibing.ts
+                (tower projection whose map zone decides a harvest's tier),
+                block-template.ts, bitcoin-address.ts.
   incubation/   Core subdomain — the lot ledger (the credit sink) and caos-client.ts,
                 the single outbound call.
   player/       Identity + bearer sessions, crypto.ts, and the auth / session / wallet /
                 profile routers.
   payments/     Charges + webhook transitions, credit-plans.ts (the catalogue — where a
                 price comes from).
-  companion/    chat.ts, chat-helpers.ts, companion.ts, anthropic.ts.
-  territory/    territory.ts, diplomacy.ts.
+  affiliate/    Two-level affiliate book — referral codes resolved at /register,
+                commissions accrued inside the payment's settle transaction, and the
+                router behind the partners portal.
+  companion/    chat.ts, chat-helpers.ts, companion.ts, anthropic.ts (also the LLM
+                gateway alen/ and territory/ call).
+  territory/    Towny projection (territory.ts, diplomacy.ts) and the town simulation
+                on top of it: wolkers.ts (native population), wolker-council.ts
+                (posture, rule-first) and armies.ts (the Risk layer) with its router.
   map/          map-markers.ts, map-tiles.ts.
   magi/         magi.ts.
-  alen/         alen.ts.
+  alen/         alen.ts (order channel + state), alen-planner.ts, alen-chat.ts.
 ```
 
 ## Full API reference and manual smoke-test commands
