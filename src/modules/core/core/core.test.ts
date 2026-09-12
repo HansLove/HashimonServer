@@ -20,6 +20,8 @@ import {
   stratumPrevHashToBE,
   reverseHex,
   evaluateYield,
+  rollYieldTier,
+  minTier,
   type PowRecord,
   type MiningJobRecord,
   type BitcoinShareSnapshot,
@@ -467,4 +469,24 @@ test("evaluateYield reads the disjoint yield + material windows", () => {
   assert.equal(evaluateYield(mk("0000002000000000")).materialKey, "abcdef0123456789");
   // progression window (hex[0..]) is disjoint — all-f prefix must not affect the yield read.
   assert.equal(evaluateYield("0".repeat(16) + "0000002000000000" + "0".repeat(32)).tier, "consumable");
+});
+
+test("rollYieldTier reads the rarity window (hex[48..64]), disjoint from yield/material", () => {
+  // layout: prefix(16) + yieldWin(16) + material(16) + RARITY(16) — only the last 16 count.
+  const mk = (rarity: string) => "ffffffffffffffff".repeat(3) + rarity;
+  assert.equal(rollYieldTier(mk("0fffffffffffffff")), "capital"); // 4 leading zero bits ≥ 4
+  assert.equal(rollYieldTier(mk("1fffffffffffffff")), "durable"); // 3 bits (≥2, <4)
+  assert.equal(rollYieldTier(mk("3fffffffffffffff")), "durable"); // 2 bits
+  assert.equal(rollYieldTier(mk("4fffffffffffffff")), "consumable"); // 1 bit (<2)
+  assert.equal(rollYieldTier(mk("ffffffffffffffff")), "consumable"); // 0 bits
+  // yield/material windows (all-f here) must not leak into the roll.
+  assert.equal(rollYieldTier(mk("0000000000000000")), "capital"); // deep, but only tail matters
+});
+
+test("minTier clamps the luck roll to the place ceiling — place caps, luck rolls under", () => {
+  assert.equal(minTier("capital", "durable"), "durable"); // capital roll, durable zone → durable
+  assert.equal(minTier("capital", "consumable"), "consumable"); // any roll, food zone → food
+  assert.equal(minTier("consumable", "capital"), "consumable"); // food roll in a rich zone → food
+  assert.equal(minTier("durable", "durable"), "durable");
+  assert.equal(minTier("capital", "capital"), "capital");
 });

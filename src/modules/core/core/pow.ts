@@ -383,8 +383,11 @@ export const YIELD_WINDOW = { start: 16, end: 32 } as const;
 export const MATERIAL_WINDOW = { start: 32, end: 48 } as const;
 /** Nested leading-zero-bit thresholds. Croqueta floor is deliberately cheap: y≥20 ≈
  *  one every ~5–20s at real browser hashrate (50–200k H/s). The old 26-bit floor
- *  (~minutes–hours per drop) made basic food feel broken. Durable/capital stay rare
- *  as strike-depth telemetry; PLACE (tower zone) still decides the recorded tier. */
+ *  (~minutes–hours per drop) made basic food feel broken. Only `consumable` (the floor)
+ *  gates the strike now — durable/capital here are strike-depth telemetry. The harvested
+ *  TIER is not read from this window: it is `minTier(rollYieldTier(hash), placeCeiling)`
+ *  (see the rarity roll below), so food dominates and capital needs both luck and a rich
+ *  zone. */
 export const YIELD_THRESHOLDS = { consumable: 20, durable: 30, capital: 34 } as const;
 
 export type YieldTier = "consumable" | "durable" | "capital";
@@ -409,4 +412,42 @@ export function evaluateYield(hash: string): YieldResult {
   else if (yieldBits >= YIELD_THRESHOLDS.consumable) tier = "consumable";
   const materialKey = h.slice(MATERIAL_WINDOW.start, MATERIAL_WINDOW.end);
   return { yieldBits, tier, materialKey };
+}
+
+// ---------------------------------------------------------------------------
+// Rarity roll — the LUCK axis of a harvest (VIBING_V1.md §2, the "player never
+// chooses" law). A strike (yieldBits ≥ consumable floor) says you FOUND something;
+// this says how GOOD it is, weighted so food dominates and capital is rarest. It lives
+// in its OWN disjoint window so it is tunable without touching the strike floor, the
+// star curve, or the material variety — and it is read from the hash, so the player can
+// no more steer it than any other window. Combine with the PLACE ceiling (the tower's
+// map zone) via `minTier`: place caps what a coordinate can ever yield, luck rolls under
+// that cap. A food zone can only ever give food; a capital zone gives all three, capital
+// rarest.
+// ---------------------------------------------------------------------------
+
+/** Hex index of the rarity-roll window (bits 192..255) — disjoint from progression,
+ *  yield and material. The luck axis, independent of the strike floor. */
+export const RARITY_WINDOW = { start: 48, end: 64 } as const;
+/** Leading-zero-bit cuts of the rarity window. Given a strike, BEFORE the place clamp:
+ *  P(bits≥2)=1/4 durable-or-better, P(bits≥4)=1/16 capital → ~75% food / ~19% durable /
+ *  ~6% capital. Food dominates by construction; capital is scarce even in a capital zone. */
+export const RARITY_THRESHOLDS = { durable: 2, capital: 4 } as const;
+
+/** The LUCK tier of a strike, read from the rarity window — always a real tier (the
+ *  consumable floor). Pure + deterministic; combine with the place ceiling via `minTier`. */
+export function rollYieldTier(hash: string): YieldTier {
+  const h = hash.toLowerCase().replace(/^0x/, "");
+  const bits = leadingZeroBits(h.slice(RARITY_WINDOW.start, RARITY_WINDOW.end));
+  if (bits >= RARITY_THRESHOLDS.capital) return "capital";
+  if (bits >= RARITY_THRESHOLDS.durable) return "durable";
+  return "consumable";
+}
+
+/** Tier ordering, low → high. */
+export const TIER_RANK: Record<YieldTier, number> = { consumable: 0, durable: 1, capital: 2 };
+
+/** The lower of two tiers — PLACE is a ceiling, LUCK is a roll under it. */
+export function minTier(a: YieldTier, b: YieldTier): YieldTier {
+  return TIER_RANK[a] <= TIER_RANK[b] ? a : b;
 }

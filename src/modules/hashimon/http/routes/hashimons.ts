@@ -5,7 +5,8 @@ import { AppError, asyncHandler } from "@/modules/core/http/errors";
 import { enrich } from "@/modules/core/http/wide-event";
 import { canOwn } from "@/modules/player/domain/players";
 import { emit, getForOwner, listByOwner, present, isGenesisSpecies } from "@/modules/hashimon/domain/hashimons";
-import { issueJob, jobResponse, submitShare, submitYield, yieldSummary } from "@/modules/mining/domain/mining";
+import { issueJob, jobResponse, submitShare, submitYield, yieldSummary, foodInventory } from "@/modules/mining/domain/mining";
+import { FOODS } from "@/modules/mining/domain/foods";
 import { Hashimons } from "@/modules/hashimon/data/species";
 
 export const hashimonsRouter = Router();
@@ -176,6 +177,7 @@ hashimonsRouter.post(
       materialKey: outcome.materialKey,
       yieldBits: outcome.yieldBits,
       hash: outcome.hash,
+      food: { key: outcome.foodKey, name: outcome.foodName },
     });
   })
 );
@@ -188,5 +190,26 @@ hashimonsRouter.get(
     const row = await getForOwner(req.params.id!, req.player!.id);
     if (!row) { throw new AppError(404, "not found", "not_found"); }
     res.json(await yieldSummary(row.id));
+  })
+);
+
+// GET /hashimons/:id/foods — the creature's larder grouped by named food (the food graph
+// inventory the UI draws). Unspent only.
+hashimonsRouter.get(
+  "/hashimons/:id/foods",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const row = await getForOwner(req.params.id!, req.player!.id);
+    if (!row) { throw new AppError(404, "not found", "not_found"); }
+    res.json({ foods: await foodInventory(row.id) });
+  })
+);
+
+// GET /foods/catalog — public: the whole food graph (nodes + weights + edges) so the web
+// can render the tree without hardcoding it. Content, not per-player state.
+hashimonsRouter.get(
+  "/foods/catalog",
+  asyncHandler(async (_req, res) => {
+    res.json({ foods: FOODS });
   })
 );

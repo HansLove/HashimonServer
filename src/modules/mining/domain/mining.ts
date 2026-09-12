@@ -5,6 +5,9 @@ import {
   calibratedShareTargetBits,
   deriveExtranonce1,
   evaluateYield,
+  rollYieldTier,
+  minTier,
+  MATERIAL_WINDOW,
   hashJob,
   verifyJobShare,
   type MiningJobRecord,
@@ -15,6 +18,7 @@ import {
 } from "@/modules/core/core/pow";
 import { getPreparedTemplate } from "@/modules/mining/domain/block-template";
 import { harvestPlaceForPlayer, bumpHeat } from "@/modules/mining/domain/vibing";
+import { foodFor, foodByKey } from "@/modules/mining/domain/foods";
 import type { HashimonRow } from "@/modules/hashimon/domain/hashimons";
 import { enrich } from "@/modules/core/http/wide-event";
 
@@ -283,7 +287,16 @@ export interface YieldSubmitBody {
 }
 
 export type YieldOutcome =
-  | { ok: true; tier: YieldTier; materialKey: string; yieldBits: number; hash: string }
+  | {
+      ok: true;
+      tier: YieldTier;
+      materialKey: string;
+      yieldBits: number;
+      hash: string;
+      /** The named item within the tier (foods.ts). */
+      foodKey: string;
+      foodName: string;
+    }
   | { ok: false; error: string; yieldBits?: number };
 
 /**
@@ -293,13 +306,16 @@ export type YieldOutcome =
  * discarded). The server recomputes the hash and dedupes by `hash` (PK), so the same hash —
  * or a submit to both routes — drops once.
  *
- * Two independent axes decide the drop (VIBING_V1.md §2):
- *  - WORK: the hash's yield window clearing the floor is the EVENT — you struck something.
- *  - PLACE: your Vibing tower's coordinate `zona(x,z)` decides the TIER you get. No tower →
- *    the consumable floor at your vault. The tier is resolved server-side from the tower's
- *    location — never a client claim — and every harvest heats that place.
- * The hash's own yield tier is kept only as telemetry (how deep the strike was); the tier
- * recorded and returned is the PLACE's.
+ * Three independent axes decide the drop, and the player steers none of them (VIBING_V1.md
+ * §2, the "player never chooses" law):
+ *  - WORK (event): the hash's yield window clearing the floor is the strike — you FOUND
+ *    something. Below it: `no_yield`.
+ *  - PLACE (ceiling): your Vibing tower's coordinate `zona(x,z)` caps the tier. No town or
+ *    tower → the consumable floor at your vault; every harvest heats that place.
+ *  - LUCK (roll): a disjoint hash window rolls the tier UNDER the place ceiling, weighted so
+ *    food dominates and capital is rarest. `minTier(rolled, ceiling)` is the harvested tier.
+ * All three are resolved server-side by recomputation, so a tier is never a client claim.
+ * The hash's own strike depth is kept only as `yield_bits` telemetry.
  */
 export async function submitYield(row: HashimonRow, body: YieldSubmitBody): Promise<YieldOutcome> {
   const jobRow = await getJobForOwner(body.jobId, row.owner_id);
@@ -325,19 +341,32 @@ export async function submitYield(row: HashimonRow, body: YieldSubmitBody): Prom
     return { ok: false, error: "no_yield", yieldBits: drop.yieldBits };
   }
 
-  // The PLACE decides the tier of what you actually harvest (and where it heats).
+  // PLACE is the ceiling, LUCK is a roll under it — the player never chooses (VIBING_V1
+  // §2). The tower's zone caps what a coordinate can ever yield; a disjoint hash window
+  // rolls the tier under that cap, weighted so food dominates and capital is rarest. A
+  // food zone can only give food; a capital zone gives all three, capital seldom.
   const spot = await harvestPlaceForPlayer(row.owner_id);
-  const tier = spot.tier;
-  enrich({ yield_bits: drop.yieldBits, yield_tier: tier, yield_place: spot.place });
+  const rolled = rollYieldTier(hash);
+  const tier = minTier(rolled, spot.tier);
+  // Which named item within the tier (the food graph) — weighted by the material window.
+  const food = foodFor(drop.materialKey, tier);
+  enrich({
+    yield_bits: drop.yieldBits,
+    yield_rolled: rolled,
+    yield_ceiling: spot.tier,
+    yield_tier: tier,
+    yield_place: spot.place,
+    yield_food: food.key,
+  });
 
   try {
     await withTransaction(async (client: DbClient) => {
       await query(
         `INSERT INTO pow_yield
-           (hash, hashimon_id, owner_id, job_id, yield_bits, tier, material_key, extranonce2, nonce, place)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+           (hash, hashimon_id, owner_id, job_id, yield_bits, tier, material_key, extranonce2, nonce, place, food_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
         [hash, row.id, row.owner_id, job.id, drop.yieldBits, tier, drop.materialKey,
-         body.extranonce2, body.nonce, spot.place],
+         body.extranonce2, body.nonce, spot.place, food.key],
         client
       );
       await bumpHeat(spot, client);
@@ -345,7 +374,7 @@ export async function submitYield(row: HashimonRow, body: YieldSubmitBody): Prom
         playerId: row.owner_id,
         hashimonId: row.id,
         action: "yield_harvested",
-        detail: { jobId: job.id, tier, materialKey: drop.materialKey, yieldBits: drop.yieldBits, place: spot.place },
+        detail: { jobId: job.id, tier, food: food.key, materialKey: drop.materialKey, yieldBits: drop.yieldBits, place: spot.place },
       });
     });
   } catch (err: unknown) {
@@ -356,7 +385,7 @@ export async function submitYield(row: HashimonRow, body: YieldSubmitBody): Prom
     throw err;
   }
 
-  return { ok: true, tier, materialKey: drop.materialKey, yieldBits: drop.yieldBits, hash };
+  return { ok: true, tier, materialKey: drop.materialKey, yieldBits: drop.yieldBits, hash, foodKey: food.key, foodName: food.name };
 }
 
 export interface YieldSummary {
@@ -414,4 +443,44 @@ export async function yieldSummary(hashimonId: string): Promise<YieldSummary> {
   }
   const croquetas = await croquetaBalance(hashimonId);
   return { total, byTier, croquetas };
+}
+
+export interface FoodStack {
+  key: string;
+  name: string;
+  tier: YieldTier;
+  /** Unspent count of this food in the creature's larder. */
+  count: number;
+}
+
+/**
+ * The creature's larder grouped by named food — what the food-graph UI shows. Only UNSPENT
+ * yields count (a consumed croqueta is gone). `food_key` is a stored convenience; a row from
+ * before the food graph (null food_key) is re-derived from its hash+tier so nothing is lost.
+ */
+export async function foodInventory(hashimonId: string): Promise<FoodStack[]> {
+  const res = await query<{ food_key: string | null; tier: YieldTier; hash: string }>(
+    `SELECT food_key, tier, hash FROM pow_yield
+      WHERE hashimon_id = $1 AND consumed_at IS NULL`,
+    [hashimonId]
+  );
+  const counts = new Map<string, number>();
+  for (const r of res.rows) {
+    // Re-derive the food for legacy rows written before food_key existed.
+    const key = r.food_key ?? foodFor(hashToMaterialKey(r.hash), r.tier).key;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const out: FoodStack[] = [];
+  for (const [key, count] of counts) {
+    const f = foodByKey(key);
+    if (f) out.push({ key: f.key, name: f.name, tier: f.tier, count });
+  }
+  // Rarest (lowest weight) first, then by name — the treats sit at the top of the list.
+  out.sort((a, b) => (foodByKey(a.key)!.weight - foodByKey(b.key)!.weight) || a.name.localeCompare(b.name));
+  return out;
+}
+
+/** The material window of a stored hash — same slice evaluateYield used to write it. */
+function hashToMaterialKey(hash: string): string {
+  return hash.toLowerCase().replace(/^0x/, "").slice(MATERIAL_WINDOW.start, MATERIAL_WINDOW.end);
 }

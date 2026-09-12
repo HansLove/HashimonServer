@@ -168,9 +168,15 @@ CREATE TABLE IF NOT EXISTS pow_yield (
   created_at   timestamptz NOT NULL DEFAULT now(),
   -- Hashi-croqueta inventory: a consumable yield is edible until consumed_at is set
   -- (docs/VIBING_V1.md §5). Durable/capital are materials, never spent here.
-  consumed_at  timestamptz
+  consumed_at  timestamptz,
+  -- Which named item within the tier (foods.ts::foodFor over material_key). Convenience,
+  -- like material_key/tier — recomputable from the hash, never authority; lets the food
+  -- inventory GROUP BY food cheaply. Nullable for rows written before the food graph.
+  food_key     text
 );
 ALTER TABLE pow_yield ADD COLUMN IF NOT EXISTS consumed_at timestamptz;
+ALTER TABLE pow_yield ADD COLUMN IF NOT EXISTS food_key text;
+CREATE INDEX IF NOT EXISTS pow_yield_food_idx ON pow_yield(hashimon_id, food_key) WHERE consumed_at IS NULL;
 CREATE INDEX IF NOT EXISTS pow_yield_hashimon_idx ON pow_yield(hashimon_id);
 CREATE INDEX IF NOT EXISTS pow_yield_owner_idx ON pow_yield(owner_id);
 -- Unspent croquetas: the Alimentar button's stock check and FIFO consume.
