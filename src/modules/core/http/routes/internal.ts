@@ -159,28 +159,42 @@ internalRouter.post(
 const coord = z.number().int().min(-1_000_000).max(1_000_000);
 const blockTriple = z.tuple([coord, coord, coord]);
 
+// Luanti's `core.write_json` cannot tell an empty array from an empty map, and renders an
+// EMPTY Lua table as either `{}` (a JSON object) or `null` — both have been observed from the
+// world: an empty top-level `towns` arrives as `{}`, an empty nested `invites` as `null`. A
+// bare `z.array` rejects both (`received: object` / `received: null`) — the cause of the
+// luanti-towns 400 storm. `luaArray` coerces exactly those empty shapes to `[]` before the
+// array parse; a non-empty object still fails, as it should.
+const luaEmptyToArray = (v: unknown) =>
+  v == null || (typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0)
+    ? []
+    : v;
+const luaArray = <T extends z.ZodTypeAny>(arr: T) => z.preprocess(luaEmptyToArray, arr);
+
 const memberSchema = z.object({
   name: z.string().min(1).max(64),
   rank: z.enum(["mayor", "comayor", "resident"]),
 });
 
 const townsSchema = z.object({
-  towns: z
-    .array(
-      z.object({
-        name: z.string().min(1).max(64),
-        blockCount: z.number().int().min(0).max(100_000).default(0),
-        memberCount: z.number().int().min(0).max(100_000).default(0),
-        mayor: z.string().max(20).nullable().optional(),
-        home: blockTriple.nullable().optional(),
-        // Capped per town: Towny's default claim cap is 64, unlimited by priv; 20k is a
-        // generous ceiling that still bounds the row.
-        blocks: z.array(blockTriple).max(20_000).default([]),
-        members: z.array(memberSchema).max(2_000).default([]),
-        invites: z.array(z.string().min(1).max(64)).max(500).default([]),
-      })
-    )
-    .max(5_000),
+  towns: luaArray(
+    z
+      .array(
+        z.object({
+          name: z.string().min(1).max(64),
+          blockCount: z.number().int().min(0).max(100_000).default(0),
+          memberCount: z.number().int().min(0).max(100_000).default(0),
+          mayor: z.string().max(20).nullable().optional(),
+          home: blockTriple.nullable().optional(),
+          // Capped per town: Towny's default claim cap is 64, unlimited by priv; 20k is a
+          // generous ceiling that still bounds the row.
+          blocks: luaArray(z.array(blockTriple).max(20_000)).default([]),
+          members: luaArray(z.array(memberSchema).max(2_000)).default([]),
+          invites: luaArray(z.array(z.string().min(1).max(64)).max(500)).default([]),
+        })
+      )
+      .max(5_000)
+  ).default([]),
 });
 
 /** The Luanti world pushes the WHOLE town snapshot here (every town in towny.town_array,
@@ -255,22 +269,22 @@ internalRouter.get(
 );
 
 const towersSchema = z.object({
-  // Luanti's write_json emits null for empty tables (not []); treat that as
-  // replace-all with zero towers so a world with none planted still syncs cleanly.
-  towers: z
-    .array(
-      z.object({
-        id: z.string().min(1).max(64),
-        town: z.string().max(64).nullable().optional(),
-        owner: z.string().max(64).nullable().optional(),
-        x: coord,
-        y: coord,
-        z: coord,
-      })
-    )
-    .max(10_000)
-    .nullable()
-    .transform((v) => v ?? []),
+  // Empty tower set arrives from Luanti as {} (see luaArray) — coerce to [] so a world with
+  // none planted still syncs cleanly as a replace-all with zero towers.
+  towers: luaArray(
+    z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          town: z.string().max(64).nullable().optional(),
+          owner: z.string().max(64).nullable().optional(),
+          x: coord,
+          y: coord,
+          z: coord,
+        })
+      )
+      .max(10_000)
+  ).default([]),
 });
 
 /** The Luanti world pushes the WHOLE set of Vibing towers here (replace-all) so the web
