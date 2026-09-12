@@ -247,6 +247,28 @@ export function genesisSpeciesName(spirit: SpiritKey, element: ElementKey): stri
   return `${ELEMENT_PREFIX[element]} ${spiritByKey(spirit)!.name}`;
 }
 
+const ELEMENT_EN: Record<string, string> = {
+  fuego: "Fire",
+  agua: "Water",
+  aire: "Air",
+  tierra: "Earth",
+  eléctrico: "Electric",
+  electrico: "Electric",
+};
+
+/** Etiqueta corta para el portal: "Guardian Air". No es el nombre de especie
+ *  (eso es "Gust Guardian"); es espíritu + elemento, que es lo que un afiliado
+ *  reconoce al hablar del cliente. */
+export function birthKindLabel(
+  spirit: string | null | undefined,
+  element: string | null | undefined,
+): string | null {
+  const s = spirit ? spiritByKey(spirit) : undefined;
+  const e = element ? ELEMENT_EN[element] : undefined;
+  if (!s || !e) return null;
+  return `${s.name} ${e}`;
+}
+
 // ---------------------------------------------------------------------------
 // La identidad completa
 // ---------------------------------------------------------------------------

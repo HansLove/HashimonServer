@@ -70,7 +70,9 @@ payment itself; payouts are manual transfers it only records.
   it. The count and total `pagado` prints are the only sign.
 - `referralsOf` deliberately drops identity — portal shows `"Cliente " +
   uuid.slice(0,4)`, never a username or email, because an affiliate is not
-  meant to see who their referrals are.
+  meant to see who their referrals are. It does include `hashimon`
+  (`"Guardian Air"`) from `birth_spirit` + `genesis_element`: the kind is
+  not identifying, and it is what the affiliate talks about.
 
 ## Dependencies
 

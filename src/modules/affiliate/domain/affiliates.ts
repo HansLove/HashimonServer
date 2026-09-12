@@ -1,4 +1,5 @@
 import { config } from "@/modules/core/config";
+import { birthKindLabel } from "@/modules/core/core/birth-identity";
 import { isUniqueViolation, query, type Sql } from "@/modules/core/db/pool";
 import { AppError } from "@/modules/core/http/errors";
 import { enrich } from "@/modules/core/http/wide-event";
@@ -224,6 +225,8 @@ export async function affiliateSummary(code: string): Promise<AffiliateSummary |
 export interface ReferralLine {
   /** Nunca el username real de otra persona: el portal no es un directorio. */
   label: string;
+  /** Espíritu + elemento, p.ej. "Guardian Air". Null si aún no tiene Genesis. */
+  hashimon: string | null;
   joinedAt: string;
   purchases: number;
   spentUsd: string;
@@ -235,12 +238,14 @@ export interface ReferralLine {
  *
  * Deliberadamente **sin identidad**: un afiliado no tiene por qué ver el nombre
  * de usuario de un cliente, y menos su correo. Ve una etiqueta estable, cuándo
- * llegó y cuánto ha generado — que es todo lo que necesita para saber si su
- * tráfico sirve.
+ * llegó, qué Hashimon le tocó y cuánto ha generado — que es todo lo que
+ * necesita para saber si su tráfico sirve.
  */
 export async function referralsOf(code: string, limit = 100): Promise<ReferralLine[]> {
   const res = await query<{
     label: string;
+    birth_spirit: string | null;
+    genesis_element: string | null;
     joined_at: string;
     purchases: number;
     spent_usd: string;
@@ -249,6 +254,8 @@ export async function referralsOf(code: string, limit = 100): Promise<ReferralLi
     `SELECT
        --Primeros 4 del uuid: estable, opaco, suficiente para distinguir filas.
        'Cliente ' || substr(pl.id::text, 1, 4)                        AS label,
+       pl.birth_spirit,
+       pl.genesis_element,
        pl.referred_at                                                 AS joined_at,
        COUNT(pay.order_id) FILTER (WHERE pay.status = 'settled')::int AS purchases,
        COALESCE(SUM(pay.amount_usd) FILTER (WHERE pay.status = 'settled'), 0) AS spent_usd,
@@ -257,13 +264,14 @@ export async function referralsOf(code: string, limit = 100): Promise<ReferralLi
        FROM players pl
        LEFT JOIN payments pay ON pay.player_id = pl.id
       WHERE lower(pl.referred_by) = lower($1)
-      GROUP BY pl.id, pl.referred_at
+      GROUP BY pl.id, pl.birth_spirit, pl.genesis_element, pl.referred_at
       ORDER BY pl.referred_at DESC
       LIMIT $2`,
     [code, limit]
   );
   return res.rows.map((r) => ({
     label: r.label,
+    hashimon: birthKindLabel(r.birth_spirit, r.genesis_element),
     joinedAt: new Date(r.joined_at).toISOString(),
     purchases: r.purchases,
     spentUsd: Number(r.spent_usd).toFixed(2),

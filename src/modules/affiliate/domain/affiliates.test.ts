@@ -7,6 +7,7 @@ import {
   createSubAffiliate,
   markPaid,
   pendingPayouts,
+  referralsOf,
   resolveAffiliateCode,
   subAffiliatesOf,
   type AffiliateRow,
@@ -310,6 +311,21 @@ describe("afiliación energética (against the local DB)", () => {
     const team = await subAffiliatesOf(root.code);
     assert.equal(team.length, 1);
     assert.equal(team[0]!.code, sub.code);
+  });
+
+  it("los referidos enseñan el tipo de Hashimon, no el username", async () => {
+    const root = await seedRoot(1500);
+    const buyer = await seedBuyerWithCharge(root.code);
+    await query(
+      `UPDATE players SET birth_spirit = 'guardian', genesis_element = 'aire' WHERE id = $1`,
+      [buyer.playerId]
+    );
+
+    const lines = await referralsOf(root.code);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!.label, /^Cliente /);
+    assert.equal(lines[0]!.hashimon, "Guardian Air");
+    assert.doesNotMatch(lines[0]!.label, /AffiliateTest/i);
   });
 
 });
