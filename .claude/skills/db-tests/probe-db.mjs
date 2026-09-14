@@ -22,8 +22,10 @@ for (;;) {
     process.exit(0);
   }
   if (Date.now() >= deadline) {
-    // A connection timeout carries no code, only its message.
-    console.log(`probe-db: ${error.code ?? "TIMEOUT"} ${error.message} target=${target}`);
+    // A connection timeout carries no code, only its message. Other codeless errors (a
+    // SASL failure on a missing password) are not timeouts and must not read as one.
+    const code = error.code ?? (/timeout/i.test(error.message) ? "TIMEOUT" : "NOCODE");
+    console.log(`probe-db: ${code} ${error.message} target=${target}`);
     process.exit(1);
   }
   await sleep(1000);

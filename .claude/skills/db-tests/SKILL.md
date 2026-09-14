@@ -32,8 +32,8 @@ needs.
 |---|---|---|
 | `ECONNREFUSED`, `TIMEOUT` | Nothing is answering | Step 3 |
 | `3D000` | Server is up, the database does not exist | Offer to create it — container: `docker exec <container> createdb -U <user> <db>`; native: `createdb -h <host> -p <port> -U <user> <db>`. Run it once the user agrees, then step 4 |
-| `28P01`, `28000` | Password or role rejected | Stop. Report the target and ask the user to fix `DATABASE_URL` in `.env`. Never edit `.env` or try other credentials |
-| anything else (`ENOTFOUND`, ...) | Misconfigured target | Report verbatim and stop |
+| `28P01`, `28000`, `NOCODE` with a `SASL`/password message | Password or role rejected | Stop. Report the target and ask the user to fix `DATABASE_URL` in `.env`. Never edit `.env` or try other credentials |
+| anything else (`ENOTFOUND`, other `NOCODE`, ...) | Misconfigured target | Report verbatim and stop |
 
 Some sandboxes hang on a refused local connection until the 3 s timeout instead of
 failing fast, so `TIMEOUT` against a local host means the same as `ECONNREFUSED`.
