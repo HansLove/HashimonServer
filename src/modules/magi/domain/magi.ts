@@ -229,6 +229,12 @@ async function runCustody(
 
 const UUID_RE = /^[0-9a-fA-F-]{36}$/;
 
+//Pure — no I/O. Split out so the "forged" verdict is assertable in a unit test
+//without forcing a DB write, and so it reads as one deliberate check.
+export function isForgedToken(token: MagiToken): boolean {
+  return !UUID_RE.test(String(token.serial ?? "")) || !verifySeal(token);
+}
+
 async function custodyOne(
   holder: string,
   token: MagiToken,
@@ -237,7 +243,7 @@ async function custodyOne(
 ): Promise<CustodyResult> {
   //Seal first, and before any DB lookup: a fabricated serial should never even
   //become a query, let alone a row lock.
-  if (!UUID_RE.test(String(token.serial ?? "")) || !verifySeal(token)) {
+  if (isForgedToken(token)) {
     await log(pool, { serial: null, holder, event, verdict: "forged", detail: { serial: token.serial ?? null } });
     return { serial: String(token.serial ?? ""), verdict: "forged", reason: "seal does not verify" };
   }
@@ -248,31 +254,17 @@ async function custodyOne(
       client
     );
     const row = rows[0];
-    if (!row) {
-      await log(client, { serial: null, holder, event, verdict: "unknown", detail: { serial: token.serial } });
-      return { serial: token.serial, verdict: "unknown" as const, reason: "no such note in the ledger" };
-    }
-    if (row.state === "retired") {
-      await log(client, { serial: row.serial, seq: row.custody_seq, holder, event, verdict: "retired" });
-      return { serial: row.serial, verdict: "retired" as const, reason: "note was retired" };
-    }
-    //The duplication check. The seal proved this note was issued by us; the nonce
-    //proves it is the copy that still holds custody. A clone is byte-identical and
-    //therefore equally well sealed — only the retired nonce gives it away.
-    if (row.custody_nonce !== token.nonce) {
+    const decision = decideCustodyVerdict(row, token);
+    if (decision.verdict !== "proceed") {
       await log(client, {
-        serial: row.serial,
-        seq: row.custody_seq,
+        serial: decision.result.verdict === "unknown" ? null : decision.result.serial,
+        seq: row?.custody_seq,
         holder,
         event,
-        verdict: "stale",
-        detail: { presented_nonce: token.nonce, ledger_seq: row.custody_seq, ledger_holder: row.holder },
+        verdict: decision.result.verdict,
+        detail: decision.verdict === "unknown" ? { serial: token.serial } : decision.detail,
       });
-      return {
-        serial: row.serial,
-        verdict: "stale" as const,
-        reason: "custody nonce already retired — duplicate copy",
-      };
+      return decision.result;
     }
     const nonce = newNonce();
     const { rows: updated } = await query<MagiNoteRow>(
@@ -280,13 +272,53 @@ async function custodyOne(
           SET state = $2, custody_nonce = $3, custody_seq = custody_seq + 1, holder = $4, moved_at = now()
         WHERE serial = $1
     RETURNING *`,
-      [row.serial, nextState, nonce, holder],
+      [row!.serial, nextState, nonce, holder],
       client
     );
     const next = updated[0]!;
     await log(client, { serial: next.serial, seq: next.custody_seq, holder, event, verdict: "ok" });
     return { serial: next.serial, verdict: "ok" as const, token: tokenFor(next) };
   });
+}
+
+export type CustodyDecision =
+  | { verdict: "unknown"; result: CustodyResult; detail?: undefined }
+  | { verdict: "retired"; result: CustodyResult; detail?: undefined }
+  | {
+      verdict: "stale";
+      result: CustodyResult;
+      detail: { presented_nonce: string; ledger_seq: number; ledger_holder: string | null };
+    }
+  | { verdict: "proceed"; result?: undefined; detail?: undefined };
+
+//Pure — no I/O. The four-way custody rule (unknown / retired / stale / proceed to
+//rotate) in one place, unit-testable against a plain row object instead of a live
+//transaction. custodyOne is left to sequence the audit log + the rotation write.
+export function decideCustodyVerdict(row: MagiNoteRow | undefined, token: MagiToken): CustodyDecision {
+  if (!row) {
+    return {
+      verdict: "unknown",
+      result: { serial: token.serial, verdict: "unknown", reason: "no such note in the ledger" },
+    };
+  }
+  if (row.state === "retired") {
+    return { verdict: "retired", result: { serial: row.serial, verdict: "retired", reason: "note was retired" } };
+  }
+  //The duplication check. The seal proved this note was issued by us; the nonce
+  //proves it is the copy that still holds custody. A clone is byte-identical and
+  //therefore equally well sealed — only the retired nonce gives it away.
+  if (row.custody_nonce !== token.nonce) {
+    return {
+      verdict: "stale",
+      result: {
+        serial: row.serial,
+        verdict: "stale",
+        reason: "custody nonce already retired — duplicate copy",
+      },
+      detail: { presented_nonce: token.nonce, ledger_seq: row.custody_seq, ledger_holder: row.holder },
+    };
+  }
+  return { verdict: "proceed" };
 }
 
 /* ---- reads -------------------------------------------------------------- */
@@ -298,10 +330,11 @@ export interface HolderState {
   notes: Array<{ serial: string; state: MagiState; sats: number; custodySeq: number; movedAt: string }>;
 }
 
-export async function holderState(holder: string): Promise<HolderState> {
+export async function holderState(holder: string, client: Sql = pool): Promise<HolderState> {
   const { rows } = await query<MagiNoteRow>(
     `SELECT * FROM magi_notes WHERE holder = $1 AND state <> 'retired' ORDER BY moved_at DESC`,
-    [holder]
+    [holder],
+    client
   );
   return {
     holder,

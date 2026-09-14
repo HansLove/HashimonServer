@@ -126,7 +126,7 @@ export async function countStarterEmissions(ownerId: string): Promise<number> {
 //
 //Sin BIRTH_SECRET configurado esto degrada a randomBytes puro: se pierde la
 //auditabilidad, no la seguridad. Nunca se detiene un nacimiento por esto.
-function deriveBirthNonce(ownerId: string, speciesKey: string, retry: number): string {
+export function deriveBirthNonce(ownerId: string, speciesKey: string, retry: number): string {
   const entropy = randomBytes(32);
   if (!config.birthSecret) {
     return entropy.subarray(0, 8).toString("hex");
@@ -139,16 +139,22 @@ function deriveBirthNonce(ownerId: string, speciesKey: string, retry: number): s
     .slice(0, 16);
 }
 
-export async function emit(input: {
-  ownerId: string;
-  speciesKey: string;
-  templateId?: string;
-  provenance?: Provenance;
-  name?: string;
-  //Sólo en un Genesis: el destino compartido que la fecha ya fijó.
-  birthSpirit?: string;
-  lifeNumber?: number;
-}): Promise<HashimonRow> {
+export async function emit(
+  input: {
+    ownerId: string;
+    speciesKey: string;
+    templateId?: string;
+    provenance?: Provenance;
+    name?: string;
+    //Sólo en un Genesis: el destino compartido que la fecha ya fijó.
+    birthSpirit?: string;
+    lifeNumber?: number;
+  },
+  //Test seam only: overrides the birth-nonce source so a test can force the
+  //DNA-collision retry branch deterministically. Production never passes this —
+  //defaults to the real deriveBirthNonce, so behavior is unchanged.
+  deriveNonce: typeof deriveBirthNonce = deriveBirthNonce
+): Promise<HashimonRow> {
   const species = Hashimons[input.speciesKey];
   if (!species) {
     throw new Error(`unknown species: ${input.speciesKey}`);
@@ -157,7 +163,7 @@ export async function emit(input: {
   const provenance = input.provenance ?? "wild";
 
   for (let attempt = 0; attempt < 5; attempt++) {
-    const birthNonce = deriveBirthNonce(input.ownerId, input.speciesKey, attempt);
+    const birthNonce = deriveNonce(input.ownerId, input.speciesKey, attempt);
     //La fórmula del DNA NO cambia entre V1 y V2. Lo que cambió es de dónde sale
     //el speciesKey: antes lo elegía el cliente, ahora lo fija la fecha.
     const dna = Dna.derive(templateId, birthNonce, input.speciesKey);

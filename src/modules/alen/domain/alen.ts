@@ -1,4 +1,4 @@
-import { query } from "@/modules/core/db/pool";
+import { query, type Sql } from "@/modules/core/db/pool";
 
 // Alen Gregory — el villano único. Este módulo es el lado servidor del canal de
 // órdenes: encola planes, los sirve al mundo, recoge el ack y guarda la
@@ -52,14 +52,18 @@ export interface AlenStateRow {
 }
 
 /** Encola un plan para que el mundo lo recoja en su siguiente poll. */
-export async function enqueueOrder(input: {
-  plan: AlenPlan;
-  source?: string;
-  reason?: string;
-}): Promise<number> {
+export async function enqueueOrder(
+  input: {
+    plan: AlenPlan;
+    source?: string;
+    reason?: string;
+  },
+  client?: Sql
+): Promise<number> {
   const res = await query<{ id: number }>(
     `INSERT INTO alen_orders (plan, source, reason) VALUES ($1, $2, $3) RETURNING id`,
-    [JSON.stringify(input.plan), input.source ?? "admin", input.reason ?? null]
+    [JSON.stringify(input.plan), input.source ?? "admin", input.reason ?? null],
+    client
   );
   const row = res.rows[0];
   if (!row) {
@@ -70,14 +74,15 @@ export async function enqueueOrder(input: {
 
 /** Lo que el mundo se lleva en cada poll. Deliberadamente pocas: un plan largo en
  *  vuelo es peor que dos cortos, porque el mundo no puede renegociar a mitad. */
-export async function listPendingOrders(limit = 5): Promise<AlenOrderRow[]> {
+export async function listPendingOrders(limit = 5, client?: Sql): Promise<AlenOrderRow[]> {
   const res = await query<AlenOrderRow>(
     `SELECT id, plan, source, reason
        FROM alen_orders
       WHERE status = 'pending'
       ORDER BY id ASC
       LIMIT $1`,
-    [limit]
+    [limit],
+    client
   );
   return res.rows;
 }
@@ -88,25 +93,30 @@ export async function listPendingOrders(limit = 5): Promise<AlenOrderRow[]> {
 export async function resolveOrder(
   id: number,
   result: "applied" | "rejected",
-  detail?: string
+  detail?: string,
+  client?: Sql
 ): Promise<void> {
   await query(
     `UPDATE alen_orders SET status = $2, detail = $3, applied_at = now()
       WHERE id = $1 AND status = 'pending'`,
-    [id, result, detail ?? null]
+    [id, result, detail ?? null],
+    client
   );
 }
 
 /** La proyección de estado que sube el mundo. Una fila, siempre la misma. */
-export async function saveState(input: {
-  alive: boolean;
-  pos?: { x: number; y: number; z: number } | null;
-  hp: number;
-  maxHp: number;
-  mood?: string | null;
-  observed: boolean;
-  digest?: unknown;
-}): Promise<void> {
+export async function saveState(
+  input: {
+    alive: boolean;
+    pos?: { x: number; y: number; z: number } | null;
+    hp: number;
+    maxHp: number;
+    mood?: string | null;
+    observed: boolean;
+    digest?: unknown;
+  },
+  client?: Sql
+): Promise<void> {
   await query(
     `INSERT INTO alen_state (id, alive, pos_x, pos_y, pos_z, hp, max_hp, mood, observed, digest, updated_at)
      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now())
@@ -125,14 +135,17 @@ export async function saveState(input: {
       input.mood ?? null,
       input.observed,
       input.digest === undefined ? null : JSON.stringify(input.digest),
-    ]
+    ],
+    client
   );
 }
 
-export async function getState(): Promise<AlenStateRow | null> {
+export async function getState(client?: Sql): Promise<AlenStateRow | null> {
   const res = await query<AlenStateRow>(
     `SELECT alive, pos_x, pos_y, pos_z, hp, max_hp, mood, observed, digest, updated_at
-       FROM alen_state WHERE id = 1`
+       FROM alen_state WHERE id = 1`,
+    [],
+    client
   );
   return res.rows[0] ?? null;
 }
@@ -140,14 +153,18 @@ export async function getState(): Promise<AlenStateRow | null> {
 /** Registra una novedad. El planificador se despierta por ESTO y no por un reloj:
  *  un dragón dando vueltas sobre un bosque vacío no genera eventos y por tanto no
  *  cuesta un solo token. El ritmo de esta tabla ES la factura. */
-export async function recordEvent(input: {
-  kind: string;
-  actor?: string | null;
-  payload?: unknown;
-}): Promise<void> {
+export async function recordEvent(
+  input: {
+    kind: string;
+    actor?: string | null;
+    payload?: unknown;
+  },
+  client?: Sql
+): Promise<void> {
   await query(
     `INSERT INTO alen_events (kind, actor, payload) VALUES ($1, $2, $3)`,
-    [input.kind, input.actor ?? null, input.payload === undefined ? null : JSON.stringify(input.payload)]
+    [input.kind, input.actor ?? null, input.payload === undefined ? null : JSON.stringify(input.payload)],
+    client
   );
 }
 
@@ -160,17 +177,18 @@ export interface AlenEventRow {
 }
 
 /** Novedades sin consumir, para quien vaya a planificar. */
-export async function listUnconsumedEvents(limit = 20): Promise<AlenEventRow[]> {
+export async function listUnconsumedEvents(limit = 20, client?: Sql): Promise<AlenEventRow[]> {
   const res = await query<AlenEventRow>(
     `SELECT id, kind, actor, payload, created_at
        FROM alen_events WHERE consumed = false
       ORDER BY id ASC LIMIT $1`,
-    [limit]
+    [limit],
+    client
   );
   return res.rows;
 }
 
-export async function consumeEvents(ids: number[]): Promise<void> {
+export async function consumeEvents(ids: number[], client?: Sql): Promise<void> {
   if (ids.length === 0) return;
-  await query(`UPDATE alen_events SET consumed = true WHERE id = ANY($1::bigint[])`, [ids]);
+  await query(`UPDATE alen_events SET consumed = true WHERE id = ANY($1::bigint[])`, [ids], client);
 }

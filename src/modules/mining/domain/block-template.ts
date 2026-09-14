@@ -32,7 +32,21 @@ const MAX_STALE_MS = 20 * 60_000;
 
 let cached: PreparedTemplate | null = null;
 
-export async function getPreparedTemplate(now = Date.now()): Promise<PreparedTemplate | null> {
+/** Test-only: same shape as `resetCouncilBudget` (wolker-council.ts) — clears the module
+ *  cache so cache-hit/stale/exhausted scenarios don't leak between test cases. */
+export function resetPreparedTemplateCache(): void {
+  cached = null;
+}
+
+/** Injection point for the RPC call — real getPreparedTemplate() defaults to
+ *  fetchRawTemplate(); a test substitutes its own without touching global fetch or a
+ *  live Bitcoin node. */
+export type FetchRawTemplate = () => Promise<RawGetBlockTemplateResult>;
+
+export async function getPreparedTemplate(
+  now = Date.now(),
+  fetchTemplate: FetchRawTemplate = fetchRawTemplate,
+): Promise<PreparedTemplate | null> {
   if (cached && now - cached.fetchedAt < config.templateRefreshMs) {
     return cached;
   }
@@ -43,7 +57,7 @@ export async function getPreparedTemplate(now = Date.now()): Promise<PreparedTem
   //as template_age_ms instead.
   const startedAt = process.hrtime.bigint();
   try {
-    const raw = await fetchRawTemplate();
+    const raw = await fetchTemplate();
     cached = prepareTemplate(raw, now);
     logger.info({
       event: "block_template_fetch",

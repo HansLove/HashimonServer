@@ -22,6 +22,13 @@ import { planFor } from "@/modules/payments/domain/credit-plans";
 
 export const GATEWAY = "btcpay-server";
 
+/**
+ * The two BTCPay calls this module makes, and nothing else — the contract a test
+ * substitutes against. Narrower than `BTCPayClient` on purpose: a fake only has to
+ * implement what createPayment actually calls, not the whole gateway surface.
+ */
+export type PaymentGateway = Pick<BTCPayClient, "createInvoice" | "getPaymentMethods">;
+
 export type PaymentStatus =
   | "waiting"
   | "confirming"
@@ -77,8 +84,16 @@ export function presentPayment(row: PaymentRow) {
  * duplicate charge is rejected by the partial unique index without leaving an
  * orphan invoice behind at BTCPay. If the gateway call then fails, the row is
  * marked failed, which also releases the index for a retry.
+ *
+ * `gatewayOverride` is a test seam only: production callers never pass it, so
+ * `gateway()` still builds the one real BTCPayClient lazily, at the same call site
+ * as before — a test supplies a `PaymentGateway` double instead.
  */
-export async function createPayment(playerId: string, sku: string): Promise<PaymentRow> {
+export async function createPayment(
+  playerId: string,
+  sku: string,
+  gatewayOverride?: PaymentGateway
+): Promise<PaymentRow> {
   const plan = await planFor(sku);
   await expireStaleCharges(playerId);
 
@@ -87,7 +102,7 @@ export async function createPayment(playerId: string, sku: string): Promise<Paym
 
   let invoice;
   try {
-    invoice = await gateway().createInvoice({
+    invoice = await (gatewayOverride ?? gateway()).createInvoice({
       amount: plan.price_usd,
       currency: "USD",
       orderId,
@@ -124,7 +139,7 @@ export async function createPayment(playerId: string, sku: string): Promise<Paym
     [orderId, invoice.id, invoice.checkoutLink, new Date(invoice.expirationTime * 1000).toISOString()]
   );
 
-  const method = await onChainMethodFor(invoice.id);
+  const method = await onChainMethodFor(invoice.id, gatewayOverride);
   const res = await query<PaymentRow>(
     `UPDATE payments
         SET amount_btc = $2, address = $3, bip21 = $4, updated_at = now()
@@ -363,9 +378,12 @@ async function insertWaitingCharge(
 //Losing the QR is not fatal: the invoice exists and is payable, and checkout_link (BTCPay's
 //own hosted page) is the documented fallback. Failing the whole charge here would 502 a
 //charge the gateway has already opened.
-async function onChainMethodFor(invoiceId: string): Promise<BTCPayPaymentMethod | undefined> {
+async function onChainMethodFor(
+  invoiceId: string,
+  gatewayOverride?: PaymentGateway
+): Promise<BTCPayPaymentMethod | undefined> {
   try {
-    return onChainMethod(await gateway().getPaymentMethods(invoiceId));
+    return onChainMethod(await (gatewayOverride ?? gateway()).getPaymentMethods(invoiceId));
   } catch (err: unknown) {
     enrich({ payment_methods_error: err instanceof Error ? err.message : String(err) });
     return undefined;

@@ -1,5 +1,5 @@
 import { config } from "@/modules/core/config";
-import { query } from "@/modules/core/db/pool";
+import { query, type Sql } from "@/modules/core/db/pool";
 import { anthropicConfigured, askModelStructured, AnthropicError } from "@/modules/companion/domain/anthropic";
 import { ALEN_SYSTEM_PROMPT } from "@/modules/alen/domain/alen-planner";
 import { recordEvent } from "@/modules/alen/domain/alen";
@@ -130,17 +130,19 @@ export type ChatResult =
       cacheRead: number;
     };
 
-const clamp = (v: unknown, lo: number, hi: number): number => {
+export const clamp = (v: unknown, lo: number, hi: number): number => {
   const n = typeof v === "number" && Number.isFinite(v) ? v : 0;
   return Math.max(lo, Math.min(hi, Math.round(n)));
 };
 
 /** Cuántas respuestas de chat lleva hoy. La compuerta es aparte de la del
  *  planificador: conversar y decidir campañas son dos presupuestos distintos. */
-async function chatsToday(): Promise<number> {
+export async function chatsToday(client?: Sql): Promise<number> {
   const res = await query<{ n: string }>(
     `SELECT count(*) n FROM alen_events
-      WHERE kind = 'chat_respondido' AND created_at > now() - interval '1 day'`
+      WHERE kind = 'chat_respondido' AND created_at > now() - interval '1 day'`,
+    [],
+    client
   );
   return Number(res.rows[0]?.n ?? 0);
 }
@@ -215,17 +217,25 @@ export function buildChatPrompt(ctx: ChatContext): string {
   return lines.join("\n");
 }
 
-export async function replyTo(ctx: ChatContext): Promise<ChatResult> {
+/** `deps.client` swaps the Postgres client (mirrors `withTransaction`'s `Sql`
+ *  param across `alen.ts`); `deps.askModel` swaps the Anthropic call. Both
+ *  default to the real implementations, so calling `replyTo(ctx)` is unchanged. */
+export async function replyTo(
+  ctx: ChatContext,
+  deps: { client?: Sql; askModel?: typeof askModelStructured } = {}
+): Promise<ChatResult> {
+  const { client, askModel = askModelStructured } = deps;
+
   if (!anthropicConfigured()) return { replied: false, why: "sin_clave" };
 
-  const used = await chatsToday();
+  const used = await chatsToday(client);
   if (used >= config.alenChatMaxPerDay) {
     return { replied: false, why: "tope_diario_chat" };
   }
 
   let out;
   try {
-    out = await askModelStructured<{
+    out = await askModel<{
       reply: string; ego: number; interest: number; respect: number;
       intent: ChatAppraisal["intent"];
     }>({
@@ -237,7 +247,7 @@ export async function replyTo(ctx: ChatContext): Promise<ChatResult> {
     });
   } catch (err) {
     const msg = err instanceof AnthropicError ? err.message : String(err);
-    await recordEvent({ kind: "chat_error", actor: ctx.player, payload: { error: msg.slice(0, 200) } });
+    await recordEvent({ kind: "chat_error", actor: ctx.player, payload: { error: msg.slice(0, 200) } }, client);
     return { replied: false, why: "error_proveedor" };
   }
 
@@ -257,19 +267,22 @@ export async function replyTo(ctx: ChatContext): Promise<ChatResult> {
       : "speak",
   };
 
-  await recordEvent({
-    kind: "chat_respondido",
-    actor: ctx.player,
-    payload: {
-      dijo: ctx.message.slice(0, 160),
-      respondio: reply.slice(0, 160) || "(silencio)",
-      ego: appraisal.ego,
-      intencion: appraisal.intent,
-      tokens_in: out.inputTokens,
-      tokens_out: out.outputTokens,
-      cache_read: out.cacheReadTokens,
+  await recordEvent(
+    {
+      kind: "chat_respondido",
+      actor: ctx.player,
+      payload: {
+        dijo: ctx.message.slice(0, 160),
+        respondio: reply.slice(0, 160) || "(silencio)",
+        ego: appraisal.ego,
+        intencion: appraisal.intent,
+        tokens_in: out.inputTokens,
+        tokens_out: out.outputTokens,
+        cache_read: out.cacheReadTokens,
+      },
     },
-  });
+    client
+  );
 
   return {
     replied: true,

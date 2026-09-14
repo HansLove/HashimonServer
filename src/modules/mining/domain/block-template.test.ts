@@ -5,8 +5,37 @@
 //sibling at some level or a broken odd-duplication rule shows up only at that scale.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeMerkleBranch, getPreparedTemplate } from "@/modules/mining/domain/block-template";
+import {
+  computeMerkleBranch,
+  getPreparedTemplate,
+  resetPreparedTemplateCache,
+  type FetchRawTemplate,
+} from "@/modules/mining/domain/block-template";
 import { doubleSha256Buffer } from "@/modules/core/core/pow";
+import { config } from "@/modules/core/config";
+
+//Minimal getblocktemplate-shaped fixture — same fields prepareTemplate() reads, so the
+//injectable FetchRawTemplate seam can drive getPreparedTemplate() deterministically without
+//a live node. Structurally matches the module's own (unexported) RawGetBlockTemplateResult.
+function fakeRawTemplate(overrides: Partial<{
+  version: number;
+  previousblockhash: string;
+  bits: string;
+  curtime: number;
+  height: number;
+  coinbasevalue: number;
+  transactions: Array<{ txid: string }>;
+}> = {}) {
+  return {
+    version: overrides.version ?? 0x20000000,
+    previousblockhash: overrides.previousblockhash ?? "11".repeat(32),
+    bits: overrides.bits ?? "1d00ffff",
+    curtime: overrides.curtime ?? 1_700_000_000,
+    height: overrides.height ?? 850_000,
+    coinbasevalue: overrides.coinbasevalue ?? 312_500_000,
+    transactions: overrides.transactions ?? [],
+  };
+}
 
 //Full pairwise merkle tree (duplicate-last-if-odd), written independently from the
 //production peel-loop, over leaves given in display (BE) hex.
@@ -102,4 +131,88 @@ test("real template: merkle branch round-trips against a from-scratch full tree"
   const rootViaFullTree = fullMerkleRoot([syntheticCoinbaseLeaf, ...txids]);
 
   assert.equal(rootViaBranch, rootViaFullTree);
+});
+
+//Injectable-fetch coverage (the extract-and-override seam): drives the cache-hit,
+//re-fetch, stale-serve and exhausted-cache branches without touching a live node.
+test("getPreparedTemplate resolves a fake raw template into a well-formed PreparedTemplate", async () => {
+  resetPreparedTemplateCache();
+  const raw = fakeRawTemplate({ height: 900_000, previousblockhash: "22".repeat(32) });
+  const now = 1_700_000_000_000;
+
+  const prepared = await getPreparedTemplate(now, async () => raw);
+
+  assert.ok(prepared);
+  assert.equal(prepared.templateId, `900000-${"22".repeat(32)}`);
+  assert.equal(prepared.height, 900_000);
+  assert.equal(prepared.fetchedAt, now);
+  assert.equal(prepared.extranonce2Size, 4);
+  //Coinbase reassembles into a well-formed transaction, same shape the "real template"
+  //check above verifies, deterministically this time.
+  const rawTx = prepared.coinbasePrefix + "deadbeef" + "00000001" + prepared.coinbaseSuffix;
+  assert.equal(rawTx.length % 2, 0, "coinbase hex must have an even length");
+  assert.equal(rawTx.slice(0, 8), "01000000", "tx version must be 1, little-endian");
+  assert.equal(rawTx.slice(-8), "00000000", "locktime must be present at the end");
+  resetPreparedTemplateCache();
+});
+
+test("getPreparedTemplate caches within the refresh window and re-fetches past it", async () => {
+  resetPreparedTemplateCache();
+  const raw = fakeRawTemplate();
+  let calls = 0;
+  const fetchTemplate: FetchRawTemplate = async () => {
+    calls++;
+    return raw;
+  };
+  const now = 1_700_000_000_000;
+
+  const first = await getPreparedTemplate(now, fetchTemplate);
+  assert.equal(calls, 1);
+
+  const cacheHit = await getPreparedTemplate(now + 1_000, fetchTemplate);
+  assert.equal(calls, 1, "a call inside the refresh window must not re-fetch");
+  assert.equal(cacheHit, first);
+
+  const refetched = await getPreparedTemplate(now + config.templateRefreshMs + 1, fetchTemplate);
+  assert.equal(calls, 2, "a call past the refresh window must re-fetch");
+  assert.notEqual(refetched, null);
+  resetPreparedTemplateCache();
+});
+
+test("getPreparedTemplate serves the stale cache when a re-fetch fails, within the ceiling", async () => {
+  resetPreparedTemplateCache();
+  const raw = fakeRawTemplate();
+  const now = 1_700_000_000_000;
+  const first = await getPreparedTemplate(now, async () => raw);
+  assert.ok(first);
+
+  const failing: FetchRawTemplate = async () => {
+    throw new Error("node unreachable");
+  };
+  const served = await getPreparedTemplate(now + config.templateRefreshMs + 1, failing);
+  assert.deepEqual(served, first, "a failed refresh must serve the last good template");
+  resetPreparedTemplateCache();
+});
+
+test("getPreparedTemplate drops a cache stale beyond MAX_STALE_MS and returns null", async () => {
+  resetPreparedTemplateCache();
+  const raw = fakeRawTemplate();
+  const now = 1_700_000_000_000;
+  await getPreparedTemplate(now, async () => raw);
+
+  const failing: FetchRawTemplate = async () => {
+    throw new Error("node unreachable");
+  };
+  const result = await getPreparedTemplate(now + 20 * 60_000 + 1, failing);
+  assert.equal(result, null, "past the staleness ceiling, degrading further is worse than no template");
+  resetPreparedTemplateCache();
+});
+
+test("getPreparedTemplate with no prior cache and a failing fetch returns null", async () => {
+  resetPreparedTemplateCache();
+  const result = await getPreparedTemplate(1_700_000_000_000, async () => {
+    throw new Error("boom");
+  });
+  assert.equal(result, null);
+  resetPreparedTemplateCache();
 });

@@ -16,7 +16,7 @@ import {
   type BitcoinShareSnapshot,
   type YieldTier,
 } from "@/modules/core/core/pow";
-import { getPreparedTemplate } from "@/modules/mining/domain/block-template";
+import { getPreparedTemplate, type PreparedTemplate } from "@/modules/mining/domain/block-template";
 import { harvestPlaceForPlayer, bumpHeat } from "@/modules/mining/domain/vibing";
 import { foodFor, foodByKey } from "@/modules/mining/domain/foods";
 import type { HashimonRow } from "@/modules/hashimon/domain/hashimons";
@@ -60,7 +60,7 @@ export async function issueJob(row: HashimonRow): Promise<MiningJobRow> {
   const now = Date.now();
 
   const prepared = config.miningMode === "bitcoin" ? await getPreparedTemplate(now) : null;
-  const mode: MiningJobRow["mode"] = prepared ? "bitcoin" : "bound";
+  const { mode, header } = buildJobHeader(row, prepared, extranonce1, now);
 
   //Enriched here rather than in the route because this is where the degradation is
   //visible: template_fallback true means bitcoin mode was configured and the node
@@ -73,24 +73,6 @@ export async function issueJob(row: HashimonRow): Promise<MiningJobRow> {
     template_fallback: config.miningMode === "bitcoin" && !prepared,
     template_age_ms: prepared ? now - prepared.fetchedAt : null,
   });
-
-  const header: StoredHeader = prepared
-    ? {
-        version: parseInt(prepared.versionHex, 16),
-        prevHash: prepared.prevhashBE,
-        merkleRoot: row.dna,
-        timestamp: prepared.curtime,
-        bits: prepared.bits,
-        templateId: prepared.templateId,
-        bitcoin: { ...prepared, extranonce1 },
-      }
-    : {
-        version: 0x20000000,
-        prevHash: "0000000000000000000000000000000000000000000000000000000000000000",
-        merkleRoot: row.dna,
-        timestamp: Math.floor(now / 1000),
-        bits: "1d00ffff",
-      };
 
   await query(`DELETE FROM mining_jobs WHERE hashimon_id = $1 AND expires_at < now()`, [row.id]);
 
@@ -111,6 +93,45 @@ export async function issueJob(row: HashimonRow): Promise<MiningJobRow> {
   );
   enrich({ job_id: res.rows[0]!.id });
   return res.rows[0]!;
+}
+
+/**
+ * Pure — no I/O. Which mode a job gets and what header shape it's issued with, given whether
+ * a template was available. Split out so the bound-vs-bitcoin branch (the auditor's
+ * mode-selection concern) is unit-testable against a plain `PreparedTemplate | null` instead
+ * of dragging in block-template's module cache or a live Bitcoin node — issueJob only
+ * sequences the template fetch and the insert around it.
+ */
+export function buildJobHeader(
+  row: HashimonRow,
+  prepared: PreparedTemplate | null,
+  extranonce1: string,
+  now: number
+): { mode: MiningJobRow["mode"]; header: StoredHeader } {
+  if (!prepared) {
+    return {
+      mode: "bound",
+      header: {
+        version: 0x20000000,
+        prevHash: "0000000000000000000000000000000000000000000000000000000000000000",
+        merkleRoot: row.dna,
+        timestamp: Math.floor(now / 1000),
+        bits: "1d00ffff",
+      },
+    };
+  }
+  return {
+    mode: "bitcoin",
+    header: {
+      version: parseInt(prepared.versionHex, 16),
+      prevHash: prepared.prevhashBE,
+      merkleRoot: row.dna,
+      timestamp: prepared.curtime,
+      bits: prepared.bits,
+      templateId: prepared.templateId,
+      bitcoin: { ...prepared, extranonce1 },
+    },
+  };
 }
 
 export async function getJobForOwner(jobId: string, ownerId: string): Promise<MiningJobRow | null> {

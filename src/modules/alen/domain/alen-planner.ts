@@ -1,5 +1,5 @@
 import { config } from "@/modules/core/config";
-import { query } from "@/modules/core/db/pool";
+import { query, type Sql } from "@/modules/core/db/pool";
 import { askModelStructured, anthropicConfigured, AnthropicError } from "@/modules/companion/domain/anthropic";
 import {
   ALEN_VERBS,
@@ -84,7 +84,7 @@ const PLAN_SCHEMA = {
   },
 } as const;
 
-type PlannerOutput = {
+export type PlannerOutput = {
   name: string;
   reason: string;
   ttl: number;
@@ -156,10 +156,10 @@ export type PlanDecision =
   | { plan: false; why: string }
   | { plan: true; events: Awaited<ReturnType<typeof listUnconsumedEvents>> };
 
-export async function shouldPlan(): Promise<PlanDecision> {
+export async function shouldPlan(client?: Sql): Promise<PlanDecision> {
   if (!anthropicConfigured()) return { plan: false, why: "sin_clave" };
 
-  const state = await getState();
+  const state = await getState(client);
   if (!state?.alive) return { plan: false, why: "alen_no_vive" };
 
   // La regla que más ahorra: si nadie lo está mirando, no hay nada que decidir.
@@ -168,18 +168,23 @@ export async function shouldPlan(): Promise<PlanDecision> {
   // Una orden pendiente ya es una decisión sin consumir. Planear encima sería
   // pagar dos veces por el mismo momento.
   const pending = await query<{ n: string }>(
-    `SELECT count(*) n FROM alen_orders WHERE status = 'pending'`
+    `SELECT count(*) n FROM alen_orders WHERE status = 'pending'`,
+    [],
+    client
   );
   if (Number(pending.rows[0]?.n ?? 0) > 0) return { plan: false, why: "orden_en_vuelo" };
 
   const recent = await query<{ n: string }>(
     `SELECT count(*) n FROM alen_plans WHERE created_at > now() - make_interval(secs => $1)`,
-    [config.alenPlanMinIntervalS]
+    [config.alenPlanMinIntervalS],
+    client
   );
   if (Number(recent.rows[0]?.n ?? 0) > 0) return { plan: false, why: "en_enfriamiento" };
 
   const today = await query<{ n: string }>(
-    `SELECT count(*) n FROM alen_plans WHERE created_at > now() - interval '1 day'`
+    `SELECT count(*) n FROM alen_plans WHERE created_at > now() - interval '1 day'`,
+    [],
+    client
   );
   if (Number(today.rows[0]?.n ?? 0) >= config.alenPlanMaxPerDay) {
     return { plan: false, why: "tope_diario" };
@@ -187,7 +192,7 @@ export async function shouldPlan(): Promise<PlanDecision> {
 
   // Y el disparo: novedades. Sin algo nuevo que decidir no se planifica, por muy
   // barato que sea. Un dragón sobrevolando un bosque vacío no genera eventos.
-  const events = await listUnconsumedEvents(20);
+  const events = await listUnconsumedEvents(20, client);
   if (events.length === 0) return { plan: false, why: "sin_novedades" };
 
   return { plan: true, events };
@@ -197,27 +202,29 @@ export async function shouldPlan(): Promise<PlanDecision> {
 // La parte volátil del prompt. Números, no prosa.
 // ---------------------------------------------------------------------------
 
-async function bestPlans(limit = 3) {
+async function bestPlans(limit = 3, client?: Sql) {
   const res = await query<{ name: string; situation: string | null; plan: AlenPlan; wins: number; losses: number }>(
     `SELECT name, situation, plan, wins, losses FROM alen_plans
       WHERE wins > losses
       ORDER BY (wins - losses) DESC, created_at DESC
       LIMIT $1`,
-    [limit]
+    [limit],
+    client
   );
   return res.rows;
 }
 
-async function recentRejections(limit = 3) {
+async function recentRejections(limit = 3, client?: Sql) {
   const res = await query<{ detail: string | null; plan: AlenPlan }>(
     `SELECT detail, plan FROM alen_orders
       WHERE status = 'rejected' ORDER BY id DESC LIMIT $1`,
-    [limit]
+    [limit],
+    client
   );
   return res.rows;
 }
 
-function buildUserContent(
+export function buildUserContent(
   state: NonNullable<Awaited<ReturnType<typeof getState>>>,
   events: Awaited<ReturnType<typeof listUnconsumedEvents>>,
   examples: Awaited<ReturnType<typeof bestPlans>>,
@@ -265,20 +272,29 @@ export type PlanResult =
 
 /** Genera un plan y lo encola. Seguro de llamar en cualquier momento: la
  *  compuerta decide, y todo error acaba como un evento, nunca como una excepción
- *  que rompa el informe del mundo. */
-export async function planOnce(): Promise<PlanResult> {
-  const decision = await shouldPlan();
+ *  que rompa el informe del mundo.
+ *
+ *  `deps.client` swaps the Postgres client (mirrors `withTransaction`'s `Sql`
+ *  param across `alen.ts`); `deps.askModel` swaps the Anthropic call. Both
+ *  default to the real implementations, so calling `planOnce()` with no args
+ *  is unchanged. */
+export async function planOnce(
+  deps: { client?: Sql; askModel?: typeof askModelStructured } = {}
+): Promise<PlanResult> {
+  const { client, askModel = askModelStructured } = deps;
+
+  const decision = await shouldPlan(client);
   if (!decision.plan) return { planned: false, why: decision.why };
 
-  const state = await getState();
+  const state = await getState(client);
   if (!state) return { planned: false, why: "alen_no_vive" };
 
-  const [examples, rejections] = await Promise.all([bestPlans(), recentRejections()]);
+  const [examples, rejections] = await Promise.all([bestPlans(3, client), recentRejections(3, client)]);
   const userContent = buildUserContent(state, decision.events, examples, rejections);
 
   let reply;
   try {
-    reply = await askModelStructured<PlannerOutput>({
+    reply = await askModel<PlannerOutput>({
       model: config.alenPlannerModel,
       cachedSystem: ALEN_SYSTEM_PROMPT,
       userContent,
@@ -286,13 +302,13 @@ export async function planOnce(): Promise<PlanResult> {
     });
   } catch (err) {
     const msg = err instanceof AnthropicError ? err.message : String(err);
-    await recordEvent({ kind: "planner_error", payload: { error: msg.slice(0, 200) } });
+    await recordEvent({ kind: "planner_error", payload: { error: msg.slice(0, 200) } }, client);
     return { planned: false, why: "error_proveedor" };
   }
 
   const out = reply.data;
   if (!out || !Array.isArray(out.verbs) || out.verbs.length === 0) {
-    await recordEvent({ kind: "planner_error", payload: { error: "respuesta_sin_plan" } });
+    await recordEvent({ kind: "planner_error", payload: { error: "respuesta_sin_plan" } }, client);
     return { planned: false, why: "respuesta_sin_plan" };
   }
 
@@ -301,12 +317,12 @@ export async function planOnce(): Promise<PlanResult> {
   // sólo evita gastar un ciclo de poll en algo que ya sabemos que no vale.
   const bad = out.verbs.find((v) => !(ALEN_VERBS as readonly string[]).includes(v.op));
   if (bad) {
-    await recordEvent({ kind: "planner_error", payload: { error: `verbo_invalido:${bad.op}` } });
+    await recordEvent({ kind: "planner_error", payload: { error: `verbo_invalido:${bad.op}` } }, client);
     return { planned: false, why: `verbo_invalido:${bad.op}` };
   }
 
   const plan = clampPlan(out);
-  const orderId = await enqueueOrder({ plan, source: "model", reason: out.reason });
+  const orderId = await enqueueOrder({ plan, source: "model", reason: out.reason }, client);
 
   await query(
     `INSERT INTO alen_plans (name, plan, situation, order_id, model, input_tokens, output_tokens, cache_read_tokens)
@@ -320,10 +336,11 @@ export async function planOnce(): Promise<PlanResult> {
       reply.inputTokens,
       reply.outputTokens,
       reply.cacheReadTokens,
-    ]
+    ],
+    client
   );
 
-  await consumeEvents(decision.events.map((e) => e.id));
+  await consumeEvents(decision.events.map((e) => e.id), client);
 
   return {
     planned: true,
@@ -338,7 +355,7 @@ export async function planOnce(): Promise<PlanResult> {
 
 /** Acota lo que el esquema no puede. El modelo lee los límites en las
  *  descripciones, pero un tope sólo es un tope cuando lo aplica el código. */
-function clampPlan(out: PlannerOutput): AlenPlan {
+export function clampPlan(out: PlannerOutput): AlenPlan {
   const ttl = Math.min(900, Math.max(30, Math.round(Number(out.ttl) || 300)));
   const verbs = out.verbs.slice(0, MAX_VERBS).map((v) => {
     // `additionalProperties: false` obliga a declarar todas las claves posibles en

@@ -38,6 +38,7 @@ import {
   SPIRITS,
 } from "@/modules/core/core/birth-identity";
 import { Hashimons } from "@/modules/hashimon/data/species";
+import { zoneAtRegion, zoneAtMapblock, zoneAtWorld, REGION, BLOCK_SIZE } from "@/modules/core/core/yield-map";
 
 const TEST_DNA = "deadbeef".repeat(8);
 
@@ -57,6 +58,46 @@ test("DNA derivation is deterministic and format-exact", () => {
   assert.equal(a.length, 64);
   assert.equal(a, sha256("template_solar_001:481927:solarCub"));
   assert.notEqual(a, Dna.derive("template_solar_001", 481928, "solarCub"));
+});
+
+test("Dna.at reads the 1-indexed nibble, and out-of-range is NaN", () => {
+  assert.equal(Dna.at(TEST_DNA, 1), 13); //'d'
+  assert.equal(Dna.at(TEST_DNA, 3), 10); //'a'
+  assert.equal(Dna.at(TEST_DNA, 8), 15); //'f'
+  assert.ok(Number.isNaN(Dna.at(TEST_DNA, 65))); //past the 64-hex string
+});
+
+test("Dna.window reads a run of nibbles as one integer; zero-length is NaN", () => {
+  assert.equal(Dna.window(TEST_DNA, 1, 8), 0xdeadbeef);
+  assert.ok(Number.isNaN(Dna.window(TEST_DNA, 1, 0)));
+});
+
+test("Dna.range scales a window into [min, max]", () => {
+  const inZeroHundred = Dna.range(TEST_DNA, 1, 8, 0, 100);
+  assert.ok(inZeroHundred > 86 && inZeroHundred < 87);
+  const inNegTen = Dna.range(TEST_DNA, 1, 8, -10, 10);
+  assert.ok(inNegTen > 7 && inNegTen < 8);
+});
+
+test("Dna.isEven follows the nibble's parity", () => {
+  assert.equal(Dna.isEven(TEST_DNA, 1), false); //13
+  assert.equal(Dna.isEven(TEST_DNA, 3), true); //10
+});
+
+test("Dna.modulo wraps the nibble by n", () => {
+  assert.equal(Dna.modulo(TEST_DNA, 1, 5), 3); //13 % 5
+});
+
+test("Dna.pick scales a window across a list, clamped to the last element", () => {
+  assert.equal(Dna.pick(TEST_DNA, 1, 2, ["a", "b", "c", "d"] as const), "d");
+  assert.equal(Dna.pick(TEST_DNA, 1, 2, [] as const), undefined);
+});
+
+test("Dna.leadingZeros counts leading '0' hex characters", () => {
+  assert.equal(Dna.leadingZeros(""), 0);
+  assert.equal(Dna.leadingZeros("0000"), 4);
+  assert.equal(Dna.leadingZeros("00ab"), 2);
+  assert.equal(Dna.leadingZeros("ffff"), 0);
 });
 
 test("leadingZeroBits counts nibble and sub-nibble zeros", () => {
@@ -489,4 +530,55 @@ test("minTier clamps the luck roll to the place ceiling — place caps, luck rol
   assert.equal(minTier("consumable", "capital"), "consumable"); // food roll in a rich zone → food
   assert.equal(minTier("durable", "durable"), "durable");
   assert.equal(minTier("capital", "capital"), "capital");
+});
+
+// --- Yield map geography (Vibing V1) ---------------------------------------
+
+test("zoneAtRegion is pure and deterministic for the same coordinates and epoch", () => {
+  const a = zoneAtRegion(0, 0);
+  const b = zoneAtRegion(0, 0);
+  assert.deepEqual(a, b);
+  assert.deepEqual(a, { tier: "capital", y: 4, material: 1926274141 });
+});
+
+test("zoneAtRegion accepts negative region coordinates", () => {
+  assert.deepEqual(zoneAtRegion(-1, -3), { tier: "durable", y: 2, material: 3997303883 });
+});
+
+test("zoneAtRegion's epoch reshuffles the geography at the same coordinates", () => {
+  const epoch1 = zoneAtRegion(0, 0, 1);
+  const epoch2 = zoneAtRegion(0, 0, 2);
+  assert.notDeepEqual(epoch1, epoch2);
+});
+
+test("zone tier is drawn from {capital, durable, consumable} only, over a wide sample", () => {
+  const seen = new Set<string>();
+  for (let x = 0; x < 50; x++) {
+    for (let z = 0; z < 50; z++) {
+      seen.add(zoneAtRegion(x, z).tier);
+    }
+  }
+  for (const tier of seen) {
+    assert.ok(["capital", "durable", "consumable"].includes(tier));
+  }
+});
+
+test("zoneAtMapblock groups REGION x REGION mapblocks into the same region", () => {
+  //Every mapblock inside the first region (0..REGION-1) resolves to region(0,0).
+  assert.deepEqual(zoneAtMapblock(0, 0), zoneAtRegion(0, 0));
+  assert.deepEqual(zoneAtMapblock(REGION - 1, 0), zoneAtRegion(0, 0));
+  //Crossing the boundary moves to the next region.
+  assert.deepEqual(zoneAtMapblock(REGION, 0), zoneAtRegion(1, 0));
+});
+
+test("zoneAtMapblock floors negative coordinates toward the region below, not toward zero", () => {
+  //floor(-1/REGION) = -1, not 0 — a naive truncation would wrongly land in region 0.
+  assert.deepEqual(zoneAtMapblock(-1, 0), zoneAtRegion(-1, 0));
+  assert.notDeepEqual(zoneAtMapblock(-1, 0), zoneAtRegion(0, 0));
+});
+
+test("zoneAtWorld converts world nodes to mapblocks via BLOCK_SIZE", () => {
+  assert.deepEqual(zoneAtWorld(0, 0), zoneAtMapblock(0, 0));
+  assert.deepEqual(zoneAtWorld(BLOCK_SIZE, 0), zoneAtMapblock(1, 0));
+  assert.deepEqual(zoneAtWorld(BLOCK_SIZE - 1, 0), zoneAtMapblock(0, 0));
 });

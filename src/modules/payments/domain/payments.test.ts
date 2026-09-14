@@ -1,15 +1,28 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { WebhookEventType, type BTCPayWebhookPayload } from "@taloon/btcpay-middleware";
+import {
+  WebhookEventType,
+  type BTCPayInvoice,
+  type BTCPayPaymentMethod,
+  type BTCPayWebhookPayload,
+} from "@taloon/btcpay-middleware";
 import {
   activePaymentFor,
   applyWebhook,
   cancelPayment,
+  createPayment,
   onChainMethod,
+  paymentByOrderId,
+  presentPayment,
   statusForWebhookEvent,
+  type PaymentGateway,
+  type PaymentRow,
 } from "@/modules/payments/domain/payments";
+import { listActivePlans, planFor } from "@/modules/payments/domain/credit-plans";
 import { pool, query } from "@/modules/core/db/pool";
 import { AppError } from "@/modules/core/http/errors";
+import { uniqueId } from "@/test/support/db";
+import { seedPlayer, deletePlayers } from "@/test/support/fixtures";
 
 function webhookPayload(
   type: BTCPayWebhookPayload["type"],
@@ -73,6 +86,49 @@ describe("payment method selection", () => {
   });
 });
 
+describe("presentPayment", () => {
+  function row(overrides: Partial<PaymentRow> = {}): PaymentRow {
+    return {
+      order_id: "credits-abc",
+      player_id: "player-1",
+      gateway: "btcpay-server",
+      invoice_id: "inv-1",
+      status: "waiting",
+      sku: "credits_500",
+      credits: 500,
+      amount_usd: "5.00",
+      amount_btc: null,
+      address: null,
+      bip21: null,
+      checkout_link: "https://pay/checkout/inv-1",
+      expires_at: new Date("2026-01-01T00:20:00Z"),
+      settled_at: null,
+      created_at: new Date("2026-01-01T00:00:00Z"),
+      updated_at: new Date("2026-01-01T00:00:00Z"),
+      ...overrides,
+    };
+  }
+
+  // Degenerate: no settlement yet — the null must survive the presentation, not become "".
+  it("leaves settledAt null for a charge that has never settled", () => {
+    const presented = presentPayment(row());
+    assert.equal(presented.settledAt, null);
+  });
+
+  // amount_usd is numeric in Postgres, which pg hands back as a string — the client needs a number.
+  it("turns the numeric-as-string amount into a real number", () => {
+    const presented = presentPayment(row({ amount_usd: "25.00" }));
+    assert.equal(presented.amountUsd, 25);
+  });
+
+  it("formats every timestamp as ISO 8601, including a settled charge", () => {
+    const presented = presentPayment(row({ settled_at: new Date("2026-01-01T00:05:00Z") }));
+    assert.equal(presented.createdAt, "2026-01-01T00:00:00.000Z");
+    assert.equal(presented.expiresAt, "2026-01-01T00:20:00.000Z");
+    assert.equal(presented.settledAt, "2026-01-01T00:05:00.000Z");
+  });
+});
+
 describe("webhook application (against the local DB)", () => {
   const playerIds: string[] = [];
 
@@ -81,7 +137,6 @@ describe("webhook application (against the local DB)", () => {
       // payments cascade with the player row.
       await query(`DELETE FROM players WHERE id = ANY($1)`, [playerIds]);
     }
-    await pool.end();
   });
 
   function uniqueInvoiceId(): string {
@@ -213,3 +268,232 @@ describe("webhook application (against the local DB)", () => {
     assert.equal(await applyWebhook(webhookPayload(WebhookEventType.INVOICE_EXPIRED, uniqueInvoiceId())), null);
   });
 });
+
+/**
+ * A `PaymentGateway` double — the exact two-method seam `createPayment` and
+ * `onChainMethodFor` call. `calls` records every `createInvoice`/`getPaymentMethods`
+ * invocation, so a test can assert the gateway was never reached (e.g. an unknown sku).
+ */
+function fakeGateway(
+  overrides: Partial<{
+    invoice: Partial<BTCPayInvoice>;
+    methods: BTCPayPaymentMethod[];
+    createInvoiceFails: boolean;
+    getPaymentMethodsFails: boolean;
+  }> = {}
+): PaymentGateway & { calls: { createInvoice: number; getPaymentMethods: number } } {
+  const calls = { createInvoice: 0, getPaymentMethods: 0 };
+  return {
+    calls,
+    async createInvoice() {
+      calls.createInvoice += 1;
+      if (overrides.createInvoiceFails) {
+        throw new Error("btcpay: could not create invoice");
+      }
+      return {
+        id: `inv-${process.hrtime.bigint().toString(36)}`,
+        storeId: "store-1",
+        amount: "5.00",
+        currency: "USD",
+        status: "New",
+        checkoutLink: "https://pay.example/checkout/1",
+        monitoringExpiration: 0,
+        expirationTime: Math.floor(Date.now() / 1000) + 1200,
+        createdTime: Math.floor(Date.now() / 1000),
+        ...overrides.invoice,
+      } as BTCPayInvoice;
+    },
+    async getPaymentMethods() {
+      calls.getPaymentMethods += 1;
+      if (overrides.getPaymentMethodsFails) {
+        throw new Error("btcpay: could not fetch payment methods");
+      }
+      return overrides.methods ?? [
+        {
+          paymentMethodId: "BTC-CHAIN",
+          currency: "BTC",
+          destination: "bc1qexample",
+          paymentLink: "bitcoin:bc1qexample?amount=0.0001",
+          amount: "0.0001",
+          due: "0.0001",
+          rate: "50000",
+          activated: true,
+        },
+      ];
+    },
+  };
+}
+
+describe("createPayment (against the local DB, gateway stubbed)", () => {
+  const playerIds: string[] = [];
+
+  after(async () => {
+    await deletePlayers(playerIds);
+  });
+
+  async function seedBuyer(): Promise<string> {
+    const player = await seedPlayer({ displayName: uniqueId("PaymentsBuyer") });
+    playerIds.push(player.id);
+    return player.id;
+  }
+
+  // Simple/general: the sku's price and credits land on the row, the gateway's invoice
+  // fields land on it too, and the on-chain method fills address/amount_btc/bip21.
+  it("opens a waiting charge priced from the catalogue, never from a caller-supplied amount", async () => {
+    const playerId = await seedBuyer();
+    const gateway = fakeGateway();
+
+    const payment = await createPayment(playerId, "credits_500", gateway);
+
+    assert.equal(payment.status, "waiting");
+    assert.equal(payment.sku, "credits_500");
+    assert.equal(payment.credits, 500);
+    assert.equal(payment.amount_usd, "5.00");
+    assert.ok(payment.invoice_id);
+    assert.ok(payment.checkout_link);
+    assert.equal(payment.address, "bc1qexample");
+    assert.equal(payment.amount_btc, "0.0001");
+    assert.equal(payment.bip21, "bitcoin:bc1qexample?amount=0.0001");
+    assert.equal(gateway.calls.createInvoice, 1);
+  });
+
+  // Edge: getPaymentMethods failing is survivable — checkout_link (BTCPay's own hosted
+  // page) is the documented fallback, and only the QR fields are lost.
+  it("keeps the checkout link but drops the QR fields when getPaymentMethods fails", async () => {
+    const playerId = await seedBuyer();
+    const gateway = fakeGateway({ getPaymentMethodsFails: true });
+
+    const payment = await createPayment(playerId, "credits_500", gateway);
+
+    assert.equal(payment.status, "waiting");
+    assert.ok(payment.checkout_link);
+    assert.equal(payment.address, null);
+    assert.equal(payment.amount_btc, null);
+    assert.equal(payment.bip21, null);
+  });
+
+  // Error: no invoice exists at BTCPay when createInvoice itself rejects, so the row is
+  // safe to write off — leaving it `waiting` would hold the partial index forever.
+  it("marks the charge failed and surfaces a 502 when the gateway rejects the invoice", async () => {
+    const playerId = await seedBuyer();
+    const gateway = fakeGateway({ createInvoiceFails: true });
+
+    await assert.rejects(
+      createPayment(playerId, "credits_500", gateway),
+      (err: unknown) => err instanceof AppError && err.status === 502 && err.code === "gateway_error"
+    );
+
+    const row = await query<{ status: string }>(
+      `SELECT status FROM payments WHERE player_id = $1`,
+      [playerId]
+    );
+    assert.equal(row.rows[0]?.status, "failed");
+  });
+
+  // Edge: the SQL unique index, not an `if`, is what makes this race-free — a second
+  // charge for the same player while one is still open must be rejected as 409.
+  it("refuses a second charge while one is already open for the player", async () => {
+    const playerId = await seedBuyer();
+    await createPayment(playerId, "credits_500", fakeGateway());
+
+    await assert.rejects(
+      createPayment(playerId, "credits_1200", fakeGateway()),
+      (err: unknown) => err instanceof AppError && err.status === 409 && err.code === "payment_pending"
+    );
+  });
+
+  // Error: an unknown sku is rejected by planFor before the ledger row is even written,
+  // so the gateway must never be reached.
+  it("refuses an unknown sku without ever touching the gateway", async () => {
+    const playerId = await seedBuyer();
+    const gateway = fakeGateway();
+
+    await assert.rejects(
+      createPayment(playerId, "not-a-real-sku", gateway),
+      (err: unknown) => err instanceof AppError && err.status === 400 && err.code === "bad_request"
+    );
+    assert.equal(gateway.calls.createInvoice, 0);
+  });
+});
+
+describe("paymentByOrderId (against the local DB)", () => {
+  const playerIds: string[] = [];
+
+  after(async () => {
+    await deletePlayers(playerIds);
+  });
+
+  it("finds a charge scoped to the player that opened it", async () => {
+    const player = await seedPlayer({ displayName: uniqueId("PaymentsOwner") });
+    playerIds.push(player.id);
+    const payment = await createPayment(player.id, "credits_500", fakeGateway());
+
+    const found = await paymentByOrderId(payment.order_id, player.id);
+    assert.equal(found?.order_id, payment.order_id);
+  });
+
+  // Error/edge: an order id must not be readable by whoever guesses it — scoping by
+  // player_id in the WHERE clause, not a post-hoc check, is what enforces that.
+  it("returns nothing for the right order id under the wrong player", async () => {
+    const owner = await seedPlayer({ displayName: uniqueId("PaymentsOwner") });
+    const stranger = await seedPlayer({ displayName: uniqueId("PaymentsStranger") });
+    playerIds.push(owner.id, stranger.id);
+    const payment = await createPayment(owner.id, "credits_500", fakeGateway());
+
+    assert.equal(await paymentByOrderId(payment.order_id, stranger.id), null);
+  });
+
+  // Degenerate: an order id that was never issued.
+  it("returns nothing for an order id that was never issued", async () => {
+    const player = await seedPlayer({ displayName: uniqueId("PaymentsOwner") });
+    playerIds.push(player.id);
+
+    assert.equal(await paymentByOrderId("credits-never-issued", player.id), null);
+  });
+});
+
+describe("credit catalogue (against the local DB)", () => {
+  // General: the seeded catalogue (schema.sql) — read-only here, never mutated, so
+  // concurrent suites touching other rows never race with this one.
+  it("lists only active plans, in display order", async () => {
+    const plans = await listActivePlans();
+    const skus = plans.map((p) => p.sku);
+    assert.ok(skus.includes("credits_500"));
+    assert.ok(skus.includes("credits_1200"));
+    assert.ok(skus.includes("credits_3000"));
+    assert.equal(skus.indexOf("credits_500") < skus.indexOf("credits_1200"), true);
+    assert.equal(skus.indexOf("credits_1200") < skus.indexOf("credits_3000"), true);
+  });
+
+  it("presents price_usd as a number, not the numeric-as-string the row carries", async () => {
+    const plans = await listActivePlans();
+    const plan = plans.find((p) => p.sku === "credits_500");
+    assert.equal(plan?.priceUsd, 5);
+  });
+
+  // Simple: resolving a known, active sku.
+  it("resolves a known sku to its catalogue row", async () => {
+    const plan = await planFor("credits_500");
+    assert.equal(plan.credits, 500);
+    assert.equal(plan.price_usd, "5.00");
+  });
+
+  // Error: an unknown sku is a malformed request (400), not a missing resource (404) —
+  // the sku only ever comes from GET /payments/plans, so this path means tampering.
+  it("refuses an unknown sku with a 400, not a 404", async () => {
+    await assert.rejects(
+      planFor("not-a-real-sku"),
+      (err: unknown) => err instanceof AppError && err.status === 400 && err.code === "bad_request"
+    );
+  });
+
+  // Degenerate: the empty string is just as unknown as a made-up sku.
+  it("refuses the empty string as a sku", async () => {
+    await assert.rejects(
+      planFor(""),
+      (err: unknown) => err instanceof AppError && err.status === 400 && err.code === "bad_request"
+    );
+  });
+});
+
+after(() => pool.end());

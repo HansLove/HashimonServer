@@ -25,6 +25,19 @@ const MEMORY_EVERY = 3;
 //Salida temprana del bloque de memoria sin ensuciar el flujo con condicionales.
 class SkipMemory extends Error {}
 
+//Seam for tests: every DB/LLM call in this file goes through `deps` instead of
+//the imported singletons directly, so a test supplies its own fakes here —
+//nothing is reassigned on the real modules. Real implementations are the
+//defaults, so every existing caller keeps its exact current behavior.
+export type ChatDbDeps = {
+  query: typeof query;
+  withTransaction: typeof withTransaction;
+};
+
+export type ChatDeps = ChatDbDeps & { askModel: typeof askModel };
+
+const defaultDeps: ChatDeps = { query, withTransaction, askModel };
+
 export type ChatState = {
   wellbeing: Wellbeing;
   keepsakes: string[];
@@ -40,8 +53,8 @@ export type CareResult = {
   croquetas: number;
 };
 
-async function ensureState(hashimonId: string): Promise<CompanionRow> {
-  const r = await query<CompanionRow>(
+async function ensureState(hashimonId: string, deps: ChatDbDeps = defaultDeps): Promise<CompanionRow> {
+  const r = await deps.query<CompanionRow>(
     `INSERT INTO companion_state (hashimon_id) VALUES ($1)
        ON CONFLICT (hashimon_id) DO UPDATE SET hashimon_id = EXCLUDED.hashimon_id
      RETURNING fed_at, talked_at, mined_at, world_at, last_sector`,
@@ -50,17 +63,19 @@ async function ensureState(hashimonId: string): Promise<CompanionRow> {
   return r.rows[0]!;
 }
 
-export async function loadState(hashimonId: string, ownerId: string): Promise<ChatState> {
-  const row = await ensureState(hashimonId);
-  const mem = await query<{ text: string }>(
+export async function loadState(
+  hashimonId: string, ownerId: string, deps: ChatDbDeps = defaultDeps
+): Promise<ChatState> {
+  const row = await ensureState(hashimonId, deps);
+  const mem = await deps.query<{ text: string }>(
     `SELECT text FROM companion_memory WHERE hashimon_id = $1 ORDER BY created_at DESC LIMIT 12`,
     [hashimonId]
   );
-  const used = await query<{ n: string }>(
+  const used = await deps.query<{ n: string }>(
     `SELECT count(*)::text AS n FROM chat_turns WHERE hashimon_id = $1 AND role = 'user'`,
     [hashimonId]
   );
-  const player = await query<{ credits: string }>(
+  const player = await deps.query<{ credits: string }>(
     `SELECT credits::text AS credits FROM players WHERE id = $1`, [ownerId]
   );
   const turnsUsed = Number(used.rows[0]?.n ?? 0);
@@ -83,6 +98,27 @@ export class ChatDenied extends Error {
   }
 }
 
+export type ChargeDecision = { needsCredits: boolean; spent: number };
+
+//EL COBRO SE COMPRUEBA ANTES DE LLAMAR AL PROVEEDOR, nunca después. Es la
+//única barrera entre una factura y una sorpresa: si se comprobara al volver,
+//un jugador sin créditos ya habría gastado el token.
+//
+//Pure decision, no I/O: takes plain numbers instead of reading `config` or a
+//DB row, so the free-turns/credits/denial paths are testable directly.
+export function decideCharge(
+  state: Pick<ChatState, "freeTurnsLeft" | "credits">, creditsPerTurn: number
+): ChargeDecision {
+  const needsCredits = state.freeTurnsLeft <= 0;
+  if (needsCredits && state.credits < creditsPerTurn) {
+    throw new ChatDenied(
+      `sin créditos: este turno cuesta ${creditsPerTurn} y tienes ${state.credits}`,
+      "insufficient_credits"
+    );
+  }
+  return { needsCredits, spent: needsCredits ? creditsPerTurn : 0 };
+}
+
 export type SpeakInput = {
   hashimonId: string;
   ownerId: string;
@@ -94,7 +130,7 @@ export type SpeakInput = {
   message: string;
 };
 
-export async function speak(input: SpeakInput): Promise<{
+export async function speak(input: SpeakInput, deps: ChatDeps = defaultDeps): Promise<{
   reply: string;
   action: CompanionAction;
   wellbeing: Wellbeing;
@@ -102,20 +138,10 @@ export async function speak(input: SpeakInput): Promise<{
   credits: number;
   keepsake: string | null;
 }> {
-  const state = await loadState(input.hashimonId, input.ownerId);
+  const state = await loadState(input.hashimonId, input.ownerId, deps);
+  const { spent } = decideCharge(state, config.chatCreditsPerTurn);
 
-  //EL COBRO SE COMPRUEBA ANTES DE LLAMAR AL PROVEEDOR, nunca después. Es la
-  //única barrera entre una factura y una sorpresa: si se comprobara al volver,
-  //un jugador sin créditos ya habría gastado el token.
-  const needsCredits = state.freeTurnsLeft <= 0;
-  if (needsCredits && state.credits < config.chatCreditsPerTurn) {
-    throw new ChatDenied(
-      `sin créditos: este turno cuesta ${config.chatCreditsPerTurn} y tienes ${state.credits}`,
-      "insufficient_credits"
-    );
-  }
-
-  const history = await query<{ role: "user" | "assistant"; content: string }>(
+  const history = await deps.query<{ role: "user" | "assistant"; content: string }>(
     `SELECT role, content FROM (
        SELECT role, content, created_at FROM chat_turns
         WHERE hashimon_id = $1 ORDER BY created_at DESC LIMIT $2
@@ -130,7 +156,7 @@ export async function speak(input: SpeakInput): Promise<{
   });
 
   const messages: ChatMessage[] = [...history.rows, { role: "user", content: input.message }];
-  const raw = await askModel(system, messages, {
+  const raw = await deps.askModel(system, messages, {
     schema: COMPANION_REPLY_SCHEMA as unknown as Record<string, unknown>,
   });
   const { reply, action } = parseCompanionReply(raw.text);
@@ -147,7 +173,7 @@ export async function speak(input: SpeakInput): Promise<{
   try {
     if (turnNumber % MEMORY_EVERY !== 0) throw new SkipMemory();
     const t = temperamentOf(input.dna);
-    const k = await askModel(system, [...messages, { role: "assistant", content: reply },
+    const k = await deps.askModel(system, [...messages, { role: "assistant", content: reply },
       { role: "user", content: memoryPrompt(t) }], { maxTokens: 80 });
     const line = k.text.trim().replace(/^["'\s]+|["'\s]+$/g, "");
     if (line && line.toUpperCase() !== "NADA" && line.length <= 240) keepsake = line;
@@ -156,10 +182,9 @@ export async function speak(input: SpeakInput): Promise<{
     void err;
   }
 
-  const spent = needsCredits ? config.chatCreditsPerTurn : 0;
   const cap = MEMORY_PROFILE[temperamentOf(input.dna)].capacity;
 
-  await withTransaction(async (c: DbClient) => {
+  await deps.withTransaction(async (c: DbClient) => {
     await c.query(
       `INSERT INTO chat_turns (hashimon_id, role, content) VALUES ($1,'user',$2)`,
       [input.hashimonId, input.message]
@@ -190,14 +215,17 @@ export async function speak(input: SpeakInput): Promise<{
     );
   });
 
-  const after = await loadState(input.hashimonId, input.ownerId);
+  const after = await loadState(input.hashimonId, input.ownerId, deps);
   return {
     reply, action, wellbeing: after.wellbeing,
     freeTurnsLeft: after.freeTurnsLeft, credits: after.credits, keepsake,
   };
 }
 
-function parseCompanionReply(raw: string): { reply: string; action: CompanionAction } {
+//Pure parsing of the model's raw text into a reply/action pair (JSON, then a
+//code-fence-stripped fallback, then plain dialogue). Exported so its branches
+//are directly testable without driving a full speak() call.
+export function parseCompanionReply(raw: string): { reply: string; action: CompanionAction } {
   try {
     const parsed = JSON.parse(raw) as { reply?: unknown; action?: unknown };
     const reply = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
@@ -229,17 +257,19 @@ function parseCompanionReply(raw: string): { reply: string; action: CompanionAct
 //Atender un cuidado concreto. Es lo que cierra el bucle: la criatura pide, el
 //jugador hace algo en el mundo, y el cuidado sube.
 //Hunger costs one Hashi-croqueta (unspent consumable yield); other cares are free.
-export async function care(hashimonId: string, kind: CareKind, sector?: string): Promise<CareResult> {
+export async function care(
+  hashimonId: string, kind: CareKind, sector?: string, deps: ChatDbDeps = defaultDeps
+): Promise<CareResult> {
   const column = { hunger: "fed_at", company: "talked_at", exercise: "mined_at", world: "world_at" }[kind];
-  await ensureState(hashimonId);
+  await ensureState(hashimonId, deps);
 
   if (kind === "hunger") {
-    return withTransaction(async (client: DbClient) => {
+    return deps.withTransaction(async (client: DbClient) => {
       const spent = await consumeCroqueta(hashimonId, client);
       if (!spent) {
         throw new AppError(409, "no croquetas — incubate to harvest food", "no_food");
       }
-      const r = await query<CompanionRow>(
+      const r = await deps.query<CompanionRow>(
         `UPDATE companion_state
             SET fed_at = now(), updated_at = now(),
                 last_sector = COALESCE($2, last_sector)
@@ -253,7 +283,7 @@ export async function care(hashimonId: string, kind: CareKind, sector?: string):
     });
   }
 
-  const r = await query<CompanionRow>(
+  const r = await deps.query<CompanionRow>(
     `UPDATE companion_state
         SET ${column} = now(), updated_at = now(),
             last_sector = COALESCE($2, last_sector)

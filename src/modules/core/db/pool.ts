@@ -13,10 +13,13 @@ export const pool = new pg.Pool({ connectionString: config.databaseUrl, connecti
 const DB_CONNECT_MAX_ATTEMPTS = 10;
 const DB_CONNECT_RETRY_DELAY_MS = 3_000;
 
-export async function waitForDb(logger: pino.Logger): Promise<void> {
+//`source` defaults to the real pool so production behavior is unchanged; a test
+//substitutes a `{ query }` double here instead of needing a live Postgres to
+//exercise the retry/backoff loop and the final-attempt failure branch.
+export async function waitForDb(logger: pino.Logger, source: Pick<pg.Pool, "query"> = pool): Promise<void> {
   for (let attempt = 1; attempt <= DB_CONNECT_MAX_ATTEMPTS; attempt++) {
     try {
-      await pool.query("SELECT 1");
+      await source.query("SELECT 1");
       logger.info({ event: "db_connected", attempt });
       return;
     } catch (err) {
@@ -32,6 +35,13 @@ export async function waitForDb(logger: pino.Logger): Promise<void> {
 }
 
 export type Sql = pg.Pool | pg.PoolClient;
+
+//The seam domain modules inject instead of importing `query` directly: a test
+//double only has to be a function with this shape, never a full pg.Pool/PoolClient.
+export type QueryFn = <T extends pg.QueryResultRow = pg.QueryResultRow>(
+  text: string,
+  params?: unknown[]
+) => Promise<pg.QueryResult<T>>;
 
 export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   text: string,
@@ -52,8 +62,14 @@ export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
 //emission so the ledger row and its audit entry commit together or not at all.
 export type DbClient = pg.PoolClient;
 
-export async function withTransaction<T>(fn: (client: DbClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
+//`source` defaults to the real pool so every existing caller keeps its exact
+//current behavior; a test substitutes a `{ connect }` double here to exercise
+//the commit and rollback-on-error branches without a live Postgres.
+export async function withTransaction<T>(
+  fn: (client: DbClient) => Promise<T>,
+  source: Pick<pg.Pool, "connect"> = pool
+): Promise<T> {
+  const client = await source.connect();
   try {
     await client.query("BEGIN");
     const result = await fn(client);

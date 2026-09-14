@@ -90,27 +90,42 @@ export interface HarvestPlace {
 }
 
 /**
+ * Pure — no I/O. The PLACE-ceiling rule (VIBING_V1.md §2): no town, or a town with no tower,
+ * floors to the player's own vault; a town with a tower yields that tower's zone. Split out so
+ * the rule the auditor flagged as "central to the yield decision" is unit-testable against
+ * plain values instead of a live `player_territory`/`vibing_towers` join —
+ * harvestPlaceForPlayer only sequences the two reads that feed it.
+ */
+export function resolveHarvestPlace(
+  playerId: string,
+  townName: string | null,
+  tower: { id: string; x: number; z: number } | null
+): HarvestPlace {
+  const vault = `vault:${playerId}`;
+  if (!townName) return { place: vault, tier: "consumable", townName: null };
+  if (!tower) return { place: vault, tier: "consumable", townName };
+  return { place: tower.id, tier: zoneAtWorld(tower.x, tower.z).tier, townName };
+}
+
+/**
  * Resolve where a player harvests and what tier it yields. A player's harvest is tied to
  * their TOWN's Vibing tower (the world owns where it stands); the tower's coordinate zona is
  * the tier. No town or no tower → the consumable floor at the player's own vault, so browser
  * work always feeds *something* while planting a tower is what unlocks the rich zones.
  */
 export async function harvestPlaceForPlayer(playerId: string): Promise<HarvestPlace> {
-  const vault = `vault:${playerId}`;
   const terr = await query<{ town_name: string | null }>(
     `SELECT town_name FROM player_territory WHERE player_id = $1`,
     [playerId]
   );
   const townName = terr.rows[0]?.town_name ?? null;
-  if (!townName) return { place: vault, tier: "consumable", townName: null };
+  if (!townName) return resolveHarvestPlace(playerId, townName, null);
 
   const tower = await query<{ id: string; x: number; z: number }>(
     `SELECT id, x, z FROM vibing_towers WHERE town_name = $1 ORDER BY id ASC LIMIT 1`,
     [townName]
   );
-  const t = tower.rows[0];
-  if (!t) return { place: vault, tier: "consumable", townName };
-  return { place: t.id, tier: zoneAtWorld(t.x, t.z).tier, townName };
+  return resolveHarvestPlace(playerId, townName, tower.rows[0] ?? null);
 }
 
 /** Record one verified harvest's heat at its place. Runs inside the yield transaction. */

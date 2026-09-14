@@ -3,12 +3,30 @@
  * API is authoritative; Luanti applies into discovery_maps. No web claiming of land.
  */
 
-import { query } from "@/modules/core/db/pool";
+import { query as dbQuery } from "@/modules/core/db/pool";
 import { AppError } from "@/modules/core/http/errors";
 import { care, loadState } from "@/modules/companion/domain/chat";
 import { listMapTiles, MAP_TILE_SIZE } from "@/modules/map/domain/map-tiles";
 import { getPlayerTerritory, getTownMembers, listTownClaims } from "@/modules/territory/domain/territory";
 import { getForOwner, listByOwner } from "@/modules/hashimon/domain/hashimons";
+
+/**
+ * Query seam: every DB call in this module goes through this mutable binding
+ * (not a direct `dbQuery` reference), so a test can substitute a fake client
+ * via `__setQueryForTest` without touching the real pool. Production code
+ * never reassigns it — it stays `dbQuery` outside tests.
+ */
+let query = dbQuery;
+
+/** Test-only hook: substitute the query function (e.g. an in-memory fake). */
+export function __setQueryForTest(fn: typeof dbQuery): void {
+  query = fn;
+}
+
+/** Test-only hook: restore the real pool-backed query after a test. */
+export function __resetQueryForTest(): void {
+  query = dbQuery;
+}
 
 /** Towny mapblock size in nodes — same as GET /territory/map `blockSize`. */
 export const BLOCK_SIZE = 16;
