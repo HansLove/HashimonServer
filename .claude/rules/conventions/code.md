@@ -19,6 +19,8 @@ never its own `logger.info`. `enrich` is a no-op outside a request, so domain co
 callable from `core/db/migrate.ts` and from the test suites. `path` is the route template
 (`/hashimons/:id`), never the resolved URL — that field is what queries group by.
 Secrets never enter the event: `redact` in `src/modules/core/logger.ts` is the backstop, the rule is
-`dna_prefix` over `dna` and `safeHost()` over `config.btcNodeUrl`. Only three events live
-outside the request cycle: `server_start`, `shutdown` and `block_template_fetch`. See the
+`dna_prefix` over `dna` and `safeHost()` over `config.btcNodeUrl`. The only events outside
+the request cycle are `server_start`, `shutdown`, `block_template_fetch` and the boot DB
+probe in `core/db/pool.ts::waitForDb` (`db_connected`, `db_connect_retry`,
+`db_connect_failed`). See the
 logging section in README.md.

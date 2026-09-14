@@ -34,8 +34,8 @@ pnpm migrate:dev       # applies src/modules/core/db/schema.sql directly — USE
 pnpm migrate           # node dist/modules/core/db/migrate.js — applies dist/modules/core/db/schema.sql (idempotent)
 pnpm typecheck         # tsc --noEmit
 pnpm test              # node --import tsx --test over the suites listed in package.json
-                       # (the DB-backed ones — auth, payments, affiliates, incubation,
-                       # food, wolkers, armies — need a live Postgres)
+                       # (every suite that imports core/db/pool or test/support/fixtures
+                       # is DB-backed and needs a live Postgres — most domain suites)
 ```
 
 Run a single test file directly: `node --import tsx --test src/modules/core/core/core.test.ts`
@@ -86,7 +86,8 @@ src/modules/
                 data/species.ts is the registry whose keys gate emission.
   mining/       Core subdomain — PoW job issuance + share submission, the yield harvest
                 (pow_yield: the Hashi-croquetas creatures and towns both eat), vibing.ts
-                (tower projection whose map zone decides a harvest's tier),
+                (tower projection whose map zone decides a harvest's tier), foods.ts
+                (the food graph — which item a harvest yields within its tier),
                 block-template.ts, bitcoin-address.ts.
   incubation/   Core subdomain — the lot ledger (the credit sink) and caos-client.ts,
                 the single outbound call.

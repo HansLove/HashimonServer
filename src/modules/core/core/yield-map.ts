@@ -3,7 +3,7 @@ import type { YieldTier } from "@/modules/core/core/pow";
 
 /**
  * Server-side mirror of the world's deterministic YIELD GEOGRAPHY (Vibing V1,
- * docs/VIBING_V1.md §2) — byte-identical to `ihashima-website/src/lib/yield-map.ts`.
+ * docs/VIBING_V1.md §2) — byte-identical to `genesis-portal/src/lib/yield-map.ts`.
  *
  * Every region of the map yields one tier of energy-food/material, decided purely by its
  * coordinates: `zona(x,z) = f(SHA256(region, epoch))`. The web draws the map from this; the

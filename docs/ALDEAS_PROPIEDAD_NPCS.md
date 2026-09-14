@@ -6,6 +6,8 @@ Paper técnico de referencia sobre **cómo funciona hoy** el ecosistema de aldea
 **Audiencia:** desarrollo backend, integración Luanti, diseño de juego  
 **Última revisión:** 2026-08-10
 
+> **Aviso de alcance (2026-09-14):** este documento cubre sólo la capa de aldeas procedurales (mg_villages + `hashimon_village_war`). Desde finales de agosto de 2026 el territorio propio de Hashimon vive en un stack nativo sobre **Towny** que aquí no se describe: `hashimon_towny` (+ `hashimon_towny_border`, `hashimon_towny_sync`) para towns y claims, `hashimon_claim` (`/expand`), `hashimon_war` (guerra estilo Risk entre towns adyacentes, con fichas y captura de cuadrantes) y `hashimon_wolkers` (población nativa). Su contraparte en el servidor es `src/modules/territory/` (`territory.ts`, `diplomacy.ts`, `wolkers.ts`, `wolker-council.ts`, `armies.ts`). La afirmación de §1 de que Hashimon "no implementa un sistema propio de propiedad" ya no es cierta para ese stack.
+
 ---
 
 ## 1. Resumen ejecutivo
@@ -18,9 +20,10 @@ Hashimon **no implementa** un sistema propio de propiedad privada ni de aldeanos
 | **hashimon_village_war** | Sí | Override de protección (guerra / excepción por jugador) |
 | **discovery_maps** | Sí | Marcadores de guerra + overlay rojo en `/map` |
 | **hashimon_entities** | Sí | Compañeros Hashimon (lobo/sprite); no aldeanos |
+| **hashimon_towny / hashimon_claim / hashimon_war / hashimon_wolkers** | Sí | Territorio nativo sobre Towny — fuera del alcance de este doc, ver aviso arriba |
 | **mobf_trader** | No instalado | Traders del modpack villages-for-minetest (externo) |
 | **NPCs LLM (“aldeanos”)** | Solo docs | [`LLM_INFERENCE_ARCHITECTURE.md`](LLM_INFERENCE_ARCHITECTURE.md) — no implementado en Luanti |
-| **NPCs 2D** | Sí (`game/`) | [`game/OverworldMap.js`](../game/OverworldMap.js) — capa browser, desacoplada de Luanti |
+| **NPCs 2D** | No (eliminado) | La capa browser `game/OverworldMap.js` ya no existe — ver §5.5 |
 
 ```mermaid
 flowchart TB
@@ -94,10 +97,10 @@ Campos relevantes de `all_villages[id]`:
 
 ### 2.4 Instalación
 
-mg_villages **no** viene en [`3d-world/mods/`](../3d-world/mods/). Hay que habilitarlo en la pestaña **Content** de Luanti junto a los mods Hashimon. El script de instalación lo recuerda explícitamente:
+mg_villages **no** viene en [`luanti/mods/`](../luanti/mods/). Hay que habilitarlo en la pestaña **Content** de Luanti junto a los mods Hashimon. El script de instalación lo recuerda explícitamente:
 
-```52:52:3d-world/util/install-hashimon-mods.sh
-echo "  3. Content DB → enable hashimon mods + discovery_maps (symlinked) + mg_villages"
+```52:52:luanti/util/install-hashimon-mods.sh
+echo "  3. Content DB → enable hashimon mods + discovery_maps + hashimon_qr_tree (symlinked) + mg_villages"
 ```
 
 ---
@@ -117,17 +120,17 @@ Hashimon **no modifica** la generación ni el registro de parcelas. Solo **lee**
 
 ### 3.2 Región “genesis” del mapa
 
-**discovery_maps** (fork Hashimon) limita la exploración y el contador de tiles al `mapgen_limit` del mundo (p. ej. Hashiworld ~±31k bloques). Eso afecta dónde aparece niebla de guerra en `/map`, no la generación de aldeas en sí. Ver [`3d-world/mods/README.md`](../3d-world/mods/README.md) sección *Genesis map region*.
+**discovery_maps** (fork Hashimon) limita la exploración y el contador de tiles al `mapgen_limit` del mundo (p. ej. Hashiworld ~±31k bloques). Eso afecta dónde aparece niebla de guerra en `/map`, no la generación de aldeas en sí. (La guía `mods/README.md` que documentaba la *Genesis map region* ya no existe en `luanti/`.)
 
 ---
 
 ## 4. hashimon_village_war — extensión Hashimon [repo]
 
-Mod: [`3d-world/mods/hashimon_village_war/`](../3d-world/mods/hashimon_village_war/)  
+Mod: [`luanti/mods/hashimon_village_war/`](../luanti/mods/hashimon_village_war/)  
 Namespace global: `hashimon_vwar`  
 Dependencia dura: **mg_villages** (si falta, el mod no carga):
 
-```3:6:3d-world/mods/hashimon_village_war/init.lua
+```3:6:luanti/mods/hashimon_village_war/init.lua
 if not core.get_modpath("mg_villages") or not mg_villages then
 	core.log("warning", "[hashimon_village_war] mg_villages not found — mod inactive")
 	return
@@ -140,7 +143,7 @@ Dependencias opcionales: `discovery_maps` (marcadores y overlay).
 
 `protection.lua` guarda el handler original y lo envuelve:
 
-```26:43:3d-world/mods/hashimon_village_war/protection.lua
+```26:43:luanti/mods/hashimon_village_war/protection.lua
 local mg_is_protected = core.is_protected
 
 core.is_protected = function(pos, name)
@@ -201,13 +204,13 @@ Operaciones principales en `storage.lua`:
 | `/vwar status` | Lista guerras, excepción del jugador, aldea actual |
 | `/vwar map [índice\|nombre]` | Abre `/map` centrado en aldea en guerra |
 
-Implementación: [`commands.lua`](../3d-world/mods/hashimon_village_war/commands.lua).
+Implementación: [`commands.lua`](../luanti/mods/hashimon_village_war/commands.lua).
 
 ### 4.4 Integración con discovery_maps
 
 **Bounds de zona hostil** (`map_sync.lua`):
 
-```18:32:3d-world/mods/hashimon_village_war/map_sync.lua
+```18:32:luanti/mods/hashimon_village_war/map_sync.lua
 function hashimon_vwar.get_village_bounds(village_id)
 	...
 	local size = v.vs * 3
@@ -225,7 +228,7 @@ end
 - Fuente: `hashimon_vwar`
 - ID: `vwar:<village_id>`
 - Etiqueta: `⚔ <nombre>`
-- API: `persistent_map.upsert_system_marker` en [`system-markers.lua`](../3d-world/mods/discovery_maps/system-markers.lua)
+- API: `persistent_map.upsert_system_marker` en [`system-markers.lua`](../luanti/mods/discovery_maps/system-markers.lua)
 
 **Overlay rojo** por tile en `show_map` cuando `hashimon_vwar.tile_in_war_zone(tile_x, tile_z)` — color `#FF0000AA` sobre tiles descubiertos.
 
@@ -233,13 +236,13 @@ Los marcadores de jugador (`/markers`) y los marcadores de sistema están separa
 
 ### 4.5 Combate Hashimon vs aldeas
 
-Los orbes explosivos en [`attack.lua`](../3d-world/mods/hashimon_entities/attack.lua) llaman a `tnt.boom` si el mod **tnt** está cargado. El motor de TNT consulta `core.is_protected` por bloque afectado:
+Los orbes explosivos en [`attack.lua`](../luanti/mods/hashimon_entities/attack.lua) llaman a `tnt.boom` si el mod **tnt** está cargado. El motor de TNT consulta `core.is_protected` por bloque afectado:
 
 - Aldea **protegida** → no hay destrucción de bloques (explosión acotada o sin efecto según tnt)
 - Aldea **en guerra** → destrucción permitida como TNT normal
 - Jugador con **excepción** → puede afectar parcelas ajenas solo él (según reglas tnt + posición)
 
-Documentado también en [`3d-world/mods/README.md`](../3d-world/mods/README.md) sección *Protected villages*.
+(La guía `mods/README.md` que también lo documentaba ya no existe en `luanti/`.)
 
 ---
 
@@ -247,7 +250,7 @@ Documentado también en [`3d-world/mods/README.md`](../3d-world/mods/README.md) 
 
 ### 5.1 Luanti 3D — sin mod de aldeano conversacional
 
-No hay mod en [`3d-world/mods/`](../3d-world/mods/) que registre aldeanos, citizens, tenants ni diálogo de pueblo. Búsqueda en el repo: cero implementación Lua de `villager` / `aldeano` en el mundo 3D.
+No hay mod en [`luanti/mods/`](../luanti/mods/) que registre aldeanos, citizens, tenants ni diálogo de pueblo. Búsqueda en el repo: cero implementación Lua de `villager` / `aldeano` en el mundo 3D.
 
 ### 5.2 Compañeros Hashimon [repo] — no son aldeanos
 
@@ -259,7 +262,7 @@ No hay mod en [`3d-world/mods/`](../3d-world/mods/) que registre aldeanos, citiz
 | Interacción | Stats, Shift+clic, `/hashimon attack` |
 | Diálogo | Ninguno |
 
-Registro del mob en [`companion.lua`](../3d-world/mods/hashimon_entities/companion.lua) vía `creatura.register_mob("hashimon_entities:companion", ...)`.
+Registro del mob en [`companion.lua`](../luanti/mods/hashimon_entities/companion.lua) vía `creatura.register_mob("hashimon_entities:companion", ...)`.
 
 ### 5.3 Traders del modpack mg_villages [externo, no integrado en repo]
 
@@ -271,14 +274,9 @@ Comportamiento típico upstream: NPCs **no deambulan** (diseño intencional del 
 
 [`LLM_INFERENCE_ARCHITECTURE.md`](LLM_INFERENCE_ARCHITECTURE.md) describe un bridge HTTP (`POST /npc/reply` o Ollama `/v1/chat/completions`) con contexto de coords, inventario y **estado vwar** (“Eastvale en guerra”). **No hay mod Luanti que lo implemente** todavía; el checklist incluye “Un NPC o comando de chat de prueba” como pendiente.
 
-### 5.5 NPCs capa 2D browser [repo, separado]
+### 5.5 NPCs capa 2D browser [eliminada]
 
-[`game/OverworldMap.js`](../game/OverworldMap.js) define NPCs scriptados (`npcA`, `npcB`, …) con:
-
-- `behaviorLoop` — patrulla o idle
-- `talking` — eventos `textMessage`, `battle`, `addStoryFlag`
-
-Esa capa es el RPG 2D en el navegador; **no comparte** estado con mg_villages, `hashimon_village_war` ni el servidor Luanti.
+El RPG 2D en navegador (`game/OverworldMap.js`, con NPCs scriptados `npcA`/`npcB`, `behaviorLoop` y `talking`) **ya no existe** en ningún repo del monorepo (`server`, `luanti`, `genesis-portal`). Nunca compartió estado con mg_villages, `hashimon_village_war` ni el servidor Luanti.
 
 ---
 
@@ -357,7 +355,7 @@ sequenceDiagram
 ### Instalación symlinks
 
 ```bash
-cd 3d-world && ./util/install-hashimon-mods.sh
+cd luanti && ./util/install-hashimon-mods.sh
 ```
 
 Luego en Luanti: Content → enable mods listados arriba + **mg_villages** desde Content DB. Reinicio completo (Cmd+Q) tras cambios en `minetest.conf`.
@@ -399,16 +397,13 @@ hashimon_core ──→ hashimon_entities ──optional──→ creatura, anim
 
 | Archivo | Contenido |
 |---------|-----------|
-| [`3d-world/mods/hashimon_village_war/protection.lua`](../3d-world/mods/hashimon_village_war/protection.lua) | Wrap `core.is_protected` |
-| [`3d-world/mods/hashimon_village_war/storage.lua`](../3d-world/mods/hashimon_village_war/storage.lua) | Persistencia JSON |
-| [`3d-world/mods/hashimon_village_war/commands.lua`](../3d-world/mods/hashimon_village_war/commands.lua) | `/vwar` |
-| [`3d-world/mods/hashimon_village_war/map_sync.lua`](../3d-world/mods/hashimon_village_war/map_sync.lua) | Mapa y bounds |
-| [`3d-world/mods/discovery_maps/system-markers.lua`](../3d-world/mods/discovery_maps/system-markers.lua) | Marcadores de sistema |
-| [`3d-world/mods/hashimon_entities/attack.lua`](../3d-world/mods/hashimon_entities/attack.lua) | Explosiones TNT |
-| [`3d-world/mods/README.md`](../3d-world/mods/README.md) | Guía operativa mods |
-| [`3d-world/util/install-hashimon-mods.sh`](../3d-world/util/install-hashimon-mods.sh) | Instalación |
-| [`game/OverworldMap.js`](../game/OverworldMap.js) | NPCs 2D |
-
+| [`luanti/mods/hashimon_village_war/protection.lua`](../luanti/mods/hashimon_village_war/protection.lua) | Wrap `core.is_protected` |
+| [`luanti/mods/hashimon_village_war/storage.lua`](../luanti/mods/hashimon_village_war/storage.lua) | Persistencia JSON |
+| [`luanti/mods/hashimon_village_war/commands.lua`](../luanti/mods/hashimon_village_war/commands.lua) | `/vwar` |
+| [`luanti/mods/hashimon_village_war/map_sync.lua`](../luanti/mods/hashimon_village_war/map_sync.lua) | Mapa y bounds |
+| [`luanti/mods/discovery_maps/system-markers.lua`](../luanti/mods/discovery_maps/system-markers.lua) | Marcadores de sistema |
+| [`luanti/mods/hashimon_entities/attack.lua`](../luanti/mods/hashimon_entities/attack.lua) | Explosiones TNT |
+| [`luanti/util/install-hashimon-mods.sh`](../luanti/util/install-hashimon-mods.sh) | Instalación |
 ### Documentación upstream
 
 - [Luanti Forum — mg_villages / ENABLE_PROTECTION](https://forum.luanti.org/viewtopic.php?t=13877)

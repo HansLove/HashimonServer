@@ -9,7 +9,7 @@
 
 import { Dna } from "@/modules/core/core/index";
 
-//Los ocho temperamentos, en el MISMO orden que ihashima-website/src/lib/compiler.ts.
+//Los ocho temperamentos, en el MISMO orden que genesis-portal/src/lib/compiler.ts.
 //El orden es la identidad: reordenar la lista le cambia el carácter a toda
 //criatura viva, porque el nibble [47] indexa por posición.
 export const TEMPERAMENTS = [

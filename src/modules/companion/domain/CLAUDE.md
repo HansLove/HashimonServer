@@ -10,7 +10,7 @@ servicios."*
 
 ## Entry Points
 
-- `companion.ts::temperamentOf` — derives one of 8 temperaments from DNA nibble [47]; must match `ihashima-website/src/lib/compiler.ts`'s order exactly.
+- `companion.ts::temperamentOf` — derives one of 8 temperaments from DNA nibble [47]; must match `genesis-portal/src/lib/compiler.ts`'s order exactly.
 - `companion.ts::wellbeingOf` — computes care levels + the single strongest "want" from a `CompanionRow`.
 - `companion.ts::buildSystemPrompt` — assembles the full system prompt from identity, temperament, wellbeing, keepsakes.
 - `chat.ts::speak` — the whole turn: credit check, LLM call, periodic memory extraction, persistence.
@@ -21,7 +21,7 @@ servicios."*
 ## Key Files
 
 - **chat-helpers.ts** — parses the Genesis V2 `speciesKey` (`g2_<spirit>_<element>`) into prompt-ready spirit/element; V1 creatures correctly yield `null`.
-- **anthropic.ts** — server-side replacement for what used to be a browser-side call with the API key in `localStorage`; the local/Ollama path (`ihashima-website/src/lib/llm.ts`) still exists for V3 and is untouched.
+- **anthropic.ts** — server-side replacement for what used to be a browser-side call with the API key in `localStorage`; the local/Ollama path (`genesis-portal/src/lib/llm.ts`) still exists for V3 and is untouched.
 
 ## Business Logic
 

@@ -11,6 +11,7 @@ the DB here is the only password store the engine ever sees.
 - `players::loginOwner`, `players::playerForToken` — password login (argon2, or SRP for a Luanti-only guest) and bearer-token resolution used by `core/http/auth.ts`.
 - `players::canOwn` — the single gate deciding if a player may own creatures (has `public_key`).
 - `players::claimSelfCustody` — migrates an owner from server-held to self-held keys.
+- `players::rebirthWithBirthDate` — the one-time V1→V2 migration behind `POST /profile/birth`: gives a pre-birth-date account its Birth Identity, archives its V1 starter and mints the birth-date Genesis.
 
 ## Key Files
 - **crypto.ts** — secp256k1 keygen/validation, scrypt+AES-GCM private-key encryption, and Luanti SRP-6a password entries (three unrelated crypto concerns, kept together because `players.ts` needs all three).
@@ -22,6 +23,7 @@ the DB here is the only password store the engine ever sees.
 - **Ownership gate.** A player can only own creatures (`POST /hashimons`) if `public_key` is set (`players::canOwn`). Anonymous/guest players (Luanti without a key) can play but not own — enforced at the domain layer, not just HTTP.
 - **Custody model.** If the caller supplies their own `publicKey`, custody is `"player"` (server never sees the private key). If not, the server generates a keypair and encrypts the private key with a key derived from the account password (`crypto::encryptPrivateKey`) — custody `"server_encrypted"`. `players::claimSelfCustody` lets an owner migrate from server-held to self-held by wiping the encrypted blob.
 - **The starter's species is never chosen.** `registerOwner` derives it from the date of birth (`core/core/birth-identity.ts::birthIdentityOf`), so a client cannot pick a rare Genesis. The body-supplied Genesis gate lives on `POST /hashimons` instead (`hashimon/http/routes/hashimons.ts`, via `isGenesisSpecies`).
+- **Rebirth archives, never rewrites.** `rebirthWithBirthDate` guards `canOwn` (403 `cannot_own`), refuses an account that already has `birth_spirit` (409 `birth_already_set`) and `invalid_dob` (422), then claims the identity with `UPDATE players ... WHERE id = $1 AND birth_spirit IS NULL` — the anti-reroll guard and the race closer, same pattern as `claimLuantiGuest`; zero rows is the same 409. The existing starter gets `archived_at`/`archive_reason = 'rebirth_v2'` instead of a new species in place, because `speciesKey` is in the DNA preimage and changing it would break every stored share. The new starter is minted through `emit()` at stage 1 — the PoW biography cannot transfer. Like registration, these writes are not one transaction.
 - **Registration is not one transaction.** The player `INSERT` (or the claim `UPDATE`) commits on its own; `emitStarterAndBindSession` then calls `emit()` and `createSession()` outside it and, on failure, runs a best-effort compensation (`DELETE` for a fresh row, revert-to-NULL for a claim) whose own error is swallowed. A crash between the two, or a failed compensation, leaves a half-registered account. A new write after the `INSERT` gets no rollback — add it to the compensation.
 
 ## Dependencies

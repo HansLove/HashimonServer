@@ -468,7 +468,7 @@ test("the solar windows cover the year with no gaps or overlaps", () => {
 test("the server and the browser agree on the temperament list", () => {
   //El nibble [47] indexa por POSICIÓN: si las dos listas se desordenan, cada
   //criatura viva cambia de carácter. El navegador tiene la suya en
-  //ihashima-website/src/lib/compiler.ts y este es el único sitio que las ata.
+  //genesis-portal/src/lib/compiler.ts y este es el único sitio que las ata.
   assert.deepEqual(
     [...TEMPERAMENTS],
     ["docile", "curious", "playful", "aggressive", "cautious", "aloof", "energetic", "serene"]
