@@ -1,4 +1,4 @@
-//Applies schema.sql. Idempotent, so `npm run migrate` is safe to re-run. For
+//Applies schema.sql. Idempotent, so `pnpm migrate` is safe to re-run. For
 //Phase 1 this stands in for a real migration tool; adopt one (e.g. node-pg-migrate)
 //once schema changes need ordering and rollback.
 import { readFileSync } from "node:fs";
@@ -9,8 +9,8 @@ import { pool } from "@/modules/core/db/pool";
 //schema.sql se lee JUNTO a este archivo, así que cuál se aplica depende de
 //desde dónde se ejecuta:
 //
-//  pnpm migrate:dev  -> src/db/schema.sql   (la fuente de verdad, para desarrollo)
-//  pnpm migrate      -> dist/db/schema.sql  (la copia que `pnpm build` deposita)
+//  pnpm migrate:dev  -> src/modules/core/db/schema.sql   (la fuente de verdad, para desarrollo)
+//  pnpm migrate      -> dist/modules/core/db/schema.sql  (la copia que `pnpm build` deposita)
 //
 //`pnpm migrate` sin `pnpm build` previo aplica una copia VIEJA y reporta éxito.
 //Ese fallo silencioso ya costó una sesión de depuración: el registro moría con

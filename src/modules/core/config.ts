@@ -28,7 +28,7 @@ function parseCorsOrigin(raw: string | undefined): string[] {
   return [...new Set([...DEFAULT_CORS_ORIGINS, ...extra])];
 }
 
-// "bitcoin" requires a client that implements hashBitcoinJob (src/core/pow.ts) —
+// "bitcoin" requires a client that implements hashBitcoinJob (src/modules/core/core/pow.ts) —
 // flipping this without a matching client rejects every share. Default stays "bound".
 const miningMode = (process.env.HASHIMON_MINING_MODE === "bitcoin" ? "bitcoin" : "bound") as "bound" | "bitcoin";
 
@@ -112,14 +112,14 @@ export const config = {
   // distinguishable (and re-sealable) without touching the ledger rows.
   magiEpoch: Number(process.env.MAGI_EPOCH ?? 1),
   // Bitcoin Core RPC URL with basic-auth credentials embedded (user:pass@host:port).
-  // Never log this value — see src/domain/block-template.ts.
+  // Never log this value — see src/modules/mining/domain/block-template.ts.
   btcNodeUrl: process.env.BTC_NODE_CONNECTION_URL ?? "",
   miningMode,
   templateRefreshMs: Number(process.env.HASHIMON_TEMPLATE_REFRESH_MS ?? 30_000),
   // Segwit address (bech32/bech32m) the coinbase output pays — never submitted to the
   // network today, but a real address keeps the template well-formed instead of an
   // unspendable OP_RETURN. Required only in bitcoin mode, no default — see
-  // src/domain/bitcoin-address.ts.
+  // src/modules/mining/domain/bitcoin-address.ts.
   coinbaseAddress: miningMode === "bitcoin" ? requireEnv("HASHIMON_COINBASE_ADDRESS") : (process.env.HASHIMON_COINBASE_ADDRESS ?? ""),
   // BTCPay Server — credit purchases. The middleware reads these env names on its own,
   // but config stays the single source and hands them to configure() explicitly.

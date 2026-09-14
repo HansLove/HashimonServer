@@ -74,7 +74,7 @@ hash = doubleSha256(`${dna}:${extranonce2}`)
 6. `hashBE = reverseHex(doubleSha256(headerHex))`
 7. Share valid if `hashBN <= shareTarget` where `shareTarget = 0xffff0000... / difficulty`
 
-Reference implementation: [`server/src/modules/core/core/pow.ts`](../server/src/modules/core/core/pow.ts) `hashBitcoinJob()`.
+Reference implementation: [`server/src/modules/core/core/pow.ts`](../src/modules/core/core/pow.ts) `hashBitcoinJob()`.
 
 ## Dev targets (calibrated)
 
