@@ -96,10 +96,11 @@ stale. `schema.sql` is idempotent, so migrating on every run is safe.
 - One file: `node --import tsx --test <file>`; narrow to one test with
   `--test-name-pattern "<regex>"`.
 
-`src/modules/alen/domain/alen-planner.test.ts` is deliberately not in `pnpm test`: it
-deletes every row of `alen_plans`, `alen_orders`, `alen_events` and `alen_state`, which on
-a development database wipes real Alen state. Run it only when the user asks for it by
-name, after confirming they accept losing those tables.
+**`pnpm test` includes `src/modules/alen/domain/alen-planner.test.ts`, which deletes every
+row of `alen_plans`, `alen_orders`, `alen_events` and `alen_state`** (unconditional
+`wipe()` in its setup). On a development database that wipes real Alen state. Before the
+full suite, confirm the user accepts losing those tables or points `DATABASE_URL` at a
+disposable database; otherwise run the other files individually.
 
 ## 6. Report
 

@@ -14,10 +14,10 @@
 //sumar dígitos y mirar dos tablas. Un jugador puede auditar su propia identidad
 //sin ejecutar nada. El hash entra después, cuando nace el individuo.
 //
-//Paridad obligatoria con 3d-world/mods/hashimon_core/birth_identity.lua y
-//ihashima-website/src/lib/birth-identity.ts. Verificado por
-//scripts/validate_birth_identity.mjs — cualquier cambio aquí rompe el harness
-//hasta que los tres archivos coincidan en las 17,897 fechas.
+//Paridad obligatoria con luanti/mods/hashimon_core/birth_identity.lua (el portal
+//genesis-portal NO reimplementa el cálculo: recibe los derivados ya resueltos).
+//Verificado por scripts/validate-birth-identity.mts — cualquier cambio aquí rompe
+//el harness hasta que ambas copias coincidan en las 17,897 fechas.
 
 export const BIRTH_IDENTITY_VERSION = 2;
 

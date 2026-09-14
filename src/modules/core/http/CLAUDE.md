@@ -72,9 +72,9 @@ event carries `username`, `register_result`, `register_source` and `player_id`,
 nothing from the body.
 
 **Emission gating (`hashimon/http/routes/hashimons.ts`):** `POST /hashimons` requires
-`canOwn(player)` (a public key), rejects unknown species, and additionally enforces
-genesis species must use `provenance: "starter"` and only once per player
-(`countStarterEmissions >= 1` → 409). The server derives the birth nonce/DNA itself
+`canOwn(player)` (a public key), rejects unknown species (422 `unknown_species`), and
+refuses every Genesis species outright (422 `genesis_not_requestable`) — a Genesis is
+issued only by `registerOwner` or `POST /profile/birth` from the date of birth. The server derives the birth nonce/DNA itself
 via `domain::emit` — a client-chosen nonce is never accepted (anti-grinding).
 
 **Error taxonomy on shares (`POST /hashimons/:id/shares`):** `submitShare`'s

@@ -63,8 +63,8 @@ self-enforces it, there is no code-side guard. If output drifts, check the promp
 not `alen-chat.ts` logic.
 
 **Model failure never throws past this module.** Both `planOnce` and `replyTo` catch
-`AnthropicError`, log an `*_error` event via `recordEvent`, and return a `{ ok: false,
-why }`-shaped result — the world's report loop must never break because the model was
+`AnthropicError`, log an `*_error` event via `recordEvent`, and return a failure result
+(`{ planned: false, why }` from `planOnce`, `{ replied: false, why }` from `replyTo`) — the world's report loop must never break because the model was
 down or over budget. Alen keeps functioning via Lua's own tactical state machine
 either way; the model makes him better, not viable.
 

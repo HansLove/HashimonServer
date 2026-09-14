@@ -15,34 +15,31 @@ submission (Phase 2), incubation / Caos Engine seeding (Phase 3), credits/paymen
 
 ## What's here
 
+Feature-first: one directory per bounded context under `src/modules/`, each with its own
+`domain/`, `http/routes/` and `data/` inside. CLAUDE.md carries the annotated tree; the
+short version:
+
 ```
 src/
-  core/        The Caos Core — the shared deterministic ruleset.
-    sha256.ts    SHA-256 + double-SHA-256 (byte-identical to the client's window.SHA256)
-    dna.ts       DNA derivation + nibble readers (port of HashimonDNA)
-    pow.ts       leadingZeroBits, share hashing, rank/stage math, verifyShare
-    core.test.ts the tests that guard verification parity with the client
-  data/
-    species.ts   server-side species registry (identity + base stats; keys gate emission)
-  db/
-    schema.sql   players, sessions, hashimons (emission ledger), credits_plans,
-                 payments, caos_pricing, caos_lots, audit_log
-    pool.ts      pg pool + withTransaction
-    migrate.ts   applies schema.sql (idempotent)
-  domain/
-    players.ts      identity + bearer sessions
-    hashimons.ts    emission (server-owned birth), inventory, present() (derived view)
-    credit-plans.ts the credit catalogue — the price lives here, never in a request
-    payments.ts     charges, webhook transitions, once-only credit settlement
-    incubation.ts   the credit sink — lot ledger, mark verification, proportional refunds
-    caos-client.ts  the single outbound POST that asks CaosEngine for a batch
-    audit.ts        append-only audit log
-  http/
-    app.ts       express wiring          auth.ts    bearer-session gate
-    errors.ts    AppError + JSON errors   routes/    session, profile, hashimons, health,
-                                                     payments, payments-webhook,
-                                                     incubation, incubation-webhook
-  server.ts      entry point
+  server.ts        entry point
+  modules/
+    core/          shared machinery
+      core/          the Caos Core — sha256, dna, pow, yield-map, birth-identity
+                     (core.test.ts guards parity with the client)
+      db/            schema.sql (source of truth), pool.ts, migrate.ts (idempotent)
+      http/          app.ts, auth.ts, errors.ts, wide-event.ts, routes/ (health, internal)
+      domain/        audit.ts, the append-only log
+    hashimon/      emission (server-owned birth), inventory, present(); data/species.ts
+    mining/        PoW jobs + shares, yield harvest, foods, vibing towers, block template
+    incubation/    the credit sink — lot ledger + caos-client.ts
+    player/        identity, bearer sessions, auth / session / wallet / profile routes
+    payments/      BTCPay charges, webhook transitions, credit-plans.ts
+    affiliate/     two-level affiliate book + partners portal router
+    companion/     companion chat and care
+    territory/     Towny projection, diplomacy, wolkers, armies
+    map/           map markers and tiles
+    magi/          the finite cubic object
+    alen/          Alen order channel, planner and chat
 ```
 
 **What the ledger stores vs. derives.** A `hashimons` row holds only *provenance*
@@ -62,25 +59,24 @@ Phase 3 Caos Engine hook that plugs into this same gate.)
 Requires **Node ≥ 20** and **Postgres ≥ 13** (for `gen_random_uuid`).
 
 ```bash
-# 1. install deps
-yarn install          # see note below on npm in this sandbox
+# 1. install deps — pnpm only (preinstall runs `only-allow pnpm`)
+pnpm install
 
 # 2. database
 createdb hashimon
 cp .env.example .env   # adjust DATABASE_URL if needed
-yarn migrate           # or: npm run migrate
+pnpm migrate:dev       # applies src/modules/core/db/schema.sql
 
 # 3. start
-yarn start             # http://localhost:4000   (yarn dev for watch mode)
+pnpm dev               # http://localhost:4000, watch mode
 ```
 
-Scripts: `dev` (watch), `start`, `migrate`, `typecheck` (`tsc --noEmit`),
-`test` (core parity tests).
-
-> **npm note:** on this machine `npm install` dies silently in its reify/extract
-> step (an environment quirk, not a dependency problem — `npm view` works, and the
-> *core* tests run dependency-free). `yarn install` works and was used to verify
-> everything below. Once installed, `npm run <script>` is fine.
+Scripts: `dev` (watch), `build` (typecheck + esbuild bundle to `dist/`, copies
+`schema.sql`), `start` (runs `dist/`), `migrate` (applies the **`dist/`** copy of the
+schema — run `build` first), `migrate:dev` (applies `src/` directly; use this in
+development), `typecheck` (`tsc --noEmit`), `test` (every module's suite listed in
+`package.json`; the DB-backed ones need a live Postgres), and three tooling scripts under
+`scripts/`: `validate:birth`, `affiliates`, `alen:bench`.
 
 ## Ownership rule
 
@@ -103,11 +99,54 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | POST | `/register` | – | **owner signup** → token + genesis Hashimon + publicKey (200 if claiming a Luanti guest, 201 if new) |
 | POST | `/login` | – | username/password → token (+ encrypted privkey blob if custody B); Luanti-only guests log in against their Luanti password |
 | POST | `/session` | – | anonymous / publicKey restore (2D/dev; no ownership) |
-| GET | `/profile` | ✓ | account state (`canOwn`, custody, counts) |
+| GET | `/profile` | ✓ | account state (`canOwn`, custody, counts, territory, birth identity) |
+| POST | `/profile/birth` | ✓ | `{dob}` → one-time V1→V2 migration: archives the V1 starter, mints the birth-date Genesis — **409 `birth_already_set`** on repeat |
 | GET | `/hashimons` | ✓ | inventory |
 | GET | `/hashimons/:id` | ✓ | one owned creature |
-| POST | `/hashimons` | ✓ | emission — **403 `cannot_own` without public_key** |
+| POST | `/hashimons` | ✓ | emission — **403 `cannot_own` without public_key**, **422 `genesis_not_requestable`** for a Genesis species |
+| GET | `/hashimons/:id/job` | ✓ | issue a PoW job for the creature |
+| POST | `/hashimons/:id/shares` | ✓ | submit a share — re-hashed and verified server-side |
+| POST | `/hashimons/:id/yield` | ✓ | submit a yield harvest (same body as a share, yield window floor) |
+| GET | `/hashimons/:id/yield` | ✓ | harvest totals per tier |
+| GET | `/hashimons/:id/foods` | ✓ | the creature's unspent larder, grouped by food |
+| GET | `/foods/catalog` | – | the whole food graph |
+| GET | `/hashimons/:id/companion` | ✓ | companion state (wellbeing, wants, remaining quota) |
+| POST | `/hashimons/:id/chat` | ✓ | talk to the companion — **402** when out of credits |
+| POST | `/hashimons/:id/care` | ✓ | attend one of the companion's needs |
 | POST | `/wallet/claim-self-custody` | ✓ | drop server-held enc private key |
+| GET | `/affiliate/me` | ✓ affiliate | portal summary — link, rate, numbers (**403 `not_an_affiliate`**) |
+| GET | `/affiliate/referrals` | ✓ affiliate | players referred by this code |
+| GET | `/affiliate/commissions` | ✓ affiliate | accrued commissions |
+| GET | `/affiliate/team` | ✓ affiliate | sub-affiliates |
+| POST | `/affiliate/team` | ✓ affiliate | create a sub-affiliate |
+| GET | `/territory/towns` | – | public town leaderboard by claimed extension |
+| GET | `/territory/map` | – | public cadastral map (Towny projection + pending web claims) |
+| GET | `/territory/map-tiles` | – | index of terrain tiles for the map underlay |
+| GET | `/territory/map-tiles/:tx/:tz.png` | – | one terrain tile |
+| GET | `/territory/vibing-towers` | – | every Vibing tower with its yield tier and heat |
+| GET | `/town/members` | ✓ | caller's town roster and ranks |
+| POST | `/town/rank` | ✓ | mayor queues a co-mayor promotion/demotion |
+| GET | `/town/invites` | ✓ | invites sent / received |
+| POST | `/town/invite` | ✓ | officer queues an invite |
+| POST | `/town/invite/revoke` | ✓ | revoke a pending invite |
+| POST | `/town/invite/respond` | ✓ | townless player accepts or denies |
+| POST | `/town/members/kick` | ✓ | officer kicks a non-mayor member |
+| POST | `/town/leave` | ✓ | non-mayor leaves their town |
+| GET | `/town/claim-quota` | ✓ | web claims left today (UTC) |
+| POST | `/town/claim` | ✓ | officer queues a mapblock claim (Luanti re-validates) |
+| GET | `/town/diplomacy` | ✓ | alliances and pending proposals |
+| POST | `/town/alliance` | ✓ | mayor proposes / accepts / declines / breaks an alliance |
+| GET | `/armies` | – | the Risk board (public by design) |
+| GET | `/armies/:town` | – | one town's army |
+| GET | `/armies/:town/battles` | – | a town's battle log |
+| POST | `/armies/orders` | ✓ | mayor issues an army order |
+| POST | `/armies/doctrine` | ✓ | mayor sets the standing doctrine |
+| GET | `/armies/mine/units` | ✓ | caller's own unit numbers |
+| GET | `/map/markers` | ✓ | markers visible to the caller |
+| GET/POST | `/map/waypoints` | ✓ | list / create personal waypoints |
+| PATCH/DELETE | `/map/waypoints/:id` | ✓ | edit / remove a waypoint |
+| GET/POST | `/map/nation-pois` | ✓ | list / create nation points of interest |
+| PATCH/DELETE | `/map/nation-pois/:id` | ✓ | edit / remove a nation POI |
 | GET | `/payments/plans` | – | the credit catalogue (active plans, in display order) |
 | POST | `/payments/btcpay-server/invoice` | ✓ | open a charge from a `sku` — **409 `payment_pending`** if one is already live |
 | GET | `/payments/btcpay-server/active` | ✓ | the live charge, or **204** when there is none |
@@ -121,6 +160,25 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | GET | `/internal/luanti-auth` | secret | account list `{name, password, can_own}` for Luanti poll |
 | POST | `/internal/luanti-register` | secret | `{name, password}` → 201 guest row (in-game signup) |
 | POST | `/internal/luanti-bind` | secret | `{name}` → bearer session (owners only) |
+| POST | `/internal/luanti-territory` | secret | sync the player→town projection |
+| POST | `/internal/luanti-towns` | secret | sync towns and their claims |
+| GET | `/internal/luanti-town-actions` | secret | web-queued town actions for the world to apply |
+| POST | `/internal/luanti-town-actions/ack` | secret | world reports applied / rejected actions |
+| GET | `/internal/luanti-alliances` | secret | active alliances the world enforces |
+| POST | `/internal/luanti-vibing-towers` | secret | replace-all sync of Vibing towers |
+| POST | `/internal/luanti-map-tiles` | secret | upload terrain tiles |
+| GET | `/internal/luanti-alen-orders` | secret | pending Alen orders |
+| POST | `/internal/luanti-alen-orders/ack` | secret | world acks an Alen order |
+| POST | `/internal/luanti-alen-state` | secret | Alen state report (feeds the planner) |
+| POST | `/internal/luanti-alen-chat` | secret | in-game chat to Alen |
+| GET | `/internal/luanti-map-markers` | secret | markers for the world |
+| POST | `/internal/luanti-map-markers/arrive` | secret | a player reached a marker |
+| POST | `/internal/luanti-player-position` | secret | player position report |
+| GET | `/internal/luanti-wolkers` | secret | wolkers the world should embody |
+| POST | `/internal/luanti-wolkers-genesis` | secret | seed a town's native population |
+| POST | `/internal/luanti-wolkers-sync` | secret | what happened to embodied wolkers (in-world deaths) |
+| POST | `/internal/luanti-wolkers-council` | secret | the town council's posture |
+| POST | `/internal/luanti-wolkers-capacity` | secret | town capacity report |
 | GET | `/magi/supply` | – | issued vs. cap, backing sats, epoch (public by design) |
 | POST | `/internal/magi/issue` | secret | `{holder, count}` → mint into a vault, **409 `supply_exhausted`** past the cap |
 | POST | `/internal/magi/withdraw` | secret | `{holder, count}` → sealed tokens to materialize as items |
@@ -134,14 +192,20 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 {
   "username": "Hans",
   "password": "at-least-8-chars",
-  "speciesKey": "genesis_fuego",
+  "dob": "1990-04-17",
   "publicKey": "02…",
-  "custody": "player"
+  "custody": "player",
+  "ref": "ABC123"
 }
 ```
 
 - `username`: same rules as Luanti (`[A-Za-z0-9_-]`, 1–20).
-- `speciesKey`: one of `genesis_fuego` | `genesis_agua` | `genesis_aire` | `genesis_tierra` | `genesis_electrico`.
+- `dob`: date of birth, `YYYY-MM-DD` (a real date, 1900 or later, not in the future — else
+  422 `invalid_dob`). It replaces the species picker: the server derives the Birth Identity
+  (spirit × element) and issues the matching Genesis (`g2_<spirit>_<element>`, 60 cells).
+  The date itself is never stored or logged, only its derivatives. The five V1
+  `genesis_*` keys are legacy — kept only so archived creatures still verify.
+- `ref`: optional affiliate code from the `?ref=` link; an unknown code still registers.
 - Omit `publicKey` / `custody` → API generates secp256k1, stores **AES-GCM encrypted** private key (`custody: server_encrypted`).
 - Send browser-derived `publicKey` + `custody: "player"` for self-custody (mnemonic step is optional in the UI).
 
@@ -191,7 +255,7 @@ mechanism, but nothing writes that format any more.
 
 ```bash
 curl -s -X POST localhost:4000/register -H 'content-type: application/json' \
-  -d '{"username":"Hans","password":"password123","speciesKey":"genesis_fuego"}' | jq
+  -d '{"username":"Hans","password":"password123","dob":"1990-04-17"}' | jq
 curl -s localhost:4000/internal/luanti-auth -H "X-Luanti-Secret: $LUANTI_SERVER_SECRET" | jq
 ```
 
@@ -206,7 +270,7 @@ curl -s -X POST localhost:4000/internal/luanti-register \
 
 ### MAGI — the finite cubic object
 
-A MAGI lives as an **item in a Luanti inventory** (`3d-world/mods/hashimon_magi`);
+A MAGI lives as an **item in a Luanti inventory** (`luanti/mods/hashimon_magi`);
 `magi_notes` is the authority on whether that item is real. Two layers:
 
 - **Seal** — HMAC over `(serial, sats, epoch, custody_nonce)` with `MAGI_SEAL_SECRET`,
@@ -505,7 +569,7 @@ line. Two levels only: `info` for what happened, `error` for what broke.
 curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
 # {"level":"info","time":"2026-08-24T18:11:04.812Z","service":"hashimon-server",
 #  "env":"development","commit":"9ba76b6","instance":"hashimon-droplet",
-#  "core_version":"caos-core@1","algo_version":"caos-core@1","mining_mode":"bound",
+#  "core_version":"caos-core@2","algo_version":"caos-core@2","mining_mode":"bound",
 #  "event":"http_request","request_id":"3f2a…","method":"GET","path":"/profile",
 #  "auth_source":"session","player_id":"…","custody":"server_encrypted","can_own":true,
 #  "hashimon_count":3,"credits":0,"status_code":200,"outcome":"success",
@@ -520,9 +584,11 @@ curl -s localhost:4000/profile -H "Authorization: Bearer $TOKEN" >/dev/null
   domain functions stay callable from `migrate.ts` and from tests.
 - **Emitting is not yours to do.** `wideEventMiddleware` is the only caller of `logger.info`
   for requests; `errorMiddleware` enriches `error_code` and returns.
-- **Outside the request cycle** there are three events of their own: `server_start`,
-  `shutdown`, and `block_template_fetch` (only on a real RPC round-trip or a failure —
-  never on a cache hit, since the fetch is shared across all miners).
+- **Outside the request cycle** there are events of their own: `server_start`,
+  `shutdown`, the boot-time DB probe (`db_connected`, `db_connect_retry`,
+  `db_connect_failed` from `core/db/pool.ts::waitForDb`), and `block_template_fetch`
+  (only on a real RPC round-trip or a failure — never on a cache hit, since the fetch is
+  shared across all miners).
 - **Never put a secret in an event.** `redact` in `src/modules/core/logger.ts` is a belt, not the rule:
   identifiers go in prefixed (`dna_prefix`, 8 hex), and `config.btcNodeUrl` — which embeds
   `user:pass@` — is logged only through `safeHost()`.

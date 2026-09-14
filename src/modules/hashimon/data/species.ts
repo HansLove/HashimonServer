@@ -13,8 +13,8 @@ import {
 //
 //This is NOT where visual identity lives. Type, archetype, color, build,
 //markings and every other look trait are derived entirely from DNA at
-//render time by encubation-website/src/lib/compiler.ts (and its Lua port,
-//3d-world/mods/hashimon_core/dna_compiler.lua) — never stored, never read
+//render time by genesis-portal/src/lib/compiler.ts (and its Lua port,
+//luanti/mods/hashimon_core/dna_compiler.lua) — never stored, never read
 //from here. See api/docs/ADN_PROPIEDAD_TEORIA_DE_JUEGO.md for the current
 //canonical type list and the Genesis DNA formula.
 //

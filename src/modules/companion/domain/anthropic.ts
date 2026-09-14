@@ -5,7 +5,7 @@
 //recordar lo que pasó y cobrar. El servidor no está aquí por la clave — está
 //aquí porque es el único sitio donde esas tres cosas pueden ocurrir.
 //
-//El camino local (Ollama, en ihashima-website/src/lib/llm.ts) NO se retira: es
+//El camino local (Ollama, en genesis-portal/src/lib/llm.ts) NO se retira: es
 //la visión V3 y sigue disponible para quien ponga su propio modelo, sin memoria
 //ni créditos.
 

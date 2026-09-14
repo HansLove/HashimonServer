@@ -20,7 +20,7 @@ Documento técnico de referencia para investigación de infraestructura: memoria
 
 ## 2. Contexto Hashimon
 
-- El mundo 3D corre en **Luanti** (`3d-world/`), no en Minecraft vanilla. La arquitectura de inferencia es la misma: el servidor (o un bridge) llama a un servicio HTTP de LLM.
+- El mundo 3D corre en **Luanti** (`luanti/`), no en Minecraft vanilla. La arquitectura de inferencia es la misma: el servidor (o un bridge) llama a un servicio HTTP de LLM.
 - Casos de uso probables: NPCs con diálogo, narrador de eventos, asistente de quests, respuestas contextuales con coords/inventario/estado de guerra (`hashimon_village_war`, etc.).
 - El LLM **no debe bloquear el tick del servidor**. Toda llamada va en async + timeout + cola.
 
@@ -314,8 +314,8 @@ Preferir sidecar si `HTTPApi` no está disponible o se quiere lógica de cola fu
 
 - [Ollama — OpenAI compatibility](https://github.com/ollama/ollama/blob/main/docs/openai.md)
 - [Ollama API](https://github.com/ollama/ollama/blob/main/docs/api.md)
-- Hashimon Luanti: `3d-world/README.md`
-- Mapas / estado mundo: `3d-world/mods/discovery_maps/`, `3d-world/mods/hashimon_village_war/`
+- Hashimon Luanti: `luanti/README.md`
+- Mapas / estado mundo: `luanti/mods/discovery_maps/`, `luanti/mods/hashimon_village_war/`
 
 ---
 

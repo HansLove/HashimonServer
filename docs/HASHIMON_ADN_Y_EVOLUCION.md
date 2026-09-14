@@ -114,13 +114,14 @@ Cada burst de ~260 ms el cliente:
 
 1. Pide un **job** al servidor (`GET /hashimons/:id/job`)
 2. Calcula hashes: `doubleSha256(dna:extranonce1:extranonce2:nonce)`
-3. Si encuentra un hash con ≥ 12 bits cero a la izquierda, envía el **share** (`POST /hashimons/:id/shares`)
+3. Si encuentra un hash con ≥ `shareTargetBits` bits cero a la izquierda (20 por defecto, `HASHIMON_SHARE_TARGET_BITS`), envía el **share** (`POST /hashimons/:id/shares`)
 4. El servidor **recomputa** el hash; si coincide, acepta y actualiza el rank
 
 ### Progresión
 
 ```
-tier = stars = stage = min( floor(bestShareBits / 4), 33 )
+tier = stars = floor(bestShareBits / 4)
+stage = min( 33, max(1, tier) )
 progreso hacia la siguiente estrella = bits % 4   (0..3 de 4)
 ```
 
@@ -128,7 +129,7 @@ Cada estrella extra exige un share ~16× más raro que la anterior (un nibble he
 
 ### Efecto en combate
 
-Al subir de stage, `HashimonSystem.applyStageScaling` aumenta HP y stats un **18% por stage** sobre la base de la especie. Evolucionar nunca reduce el HP actual proporcionalmente: ganas la diferencia de `maxHp`.
+**Histórico:** en el cliente `game/` (ya eliminado), `HashimonSystem.applyStageScaling` aumentaba HP y stats un **18% por stage** sobre la base de la especie, sin reducir el HP actual (se ganaba la diferencia de `maxHp`). Hoy no hay código de combate ni de escalado de stats en el servidor.
 
 ### Qué no cambia al evolucionar
 
@@ -139,19 +140,11 @@ Al subir de stage, `HashimonSystem.applyStageScaling` aumenta HP y stats un **18
 
 ## 6. Genesis elemental — tu primer Hashimon
 
-Al empezar **New Adventure**, eliges uno de **cinco elementos puros**:
+Tu Genesis **no se elige**: lo fija tu **fecha de nacimiento**. Al registrarte entregas la fecha y el servidor calcula tu Birth Identity (fecha → espíritu, número de vida y elemento, `core/core/birth-identity.ts`), que corresponde a una de **60 especies Genesis** `g2_<spirit>_<element>`. La fecha no se guarda; sólo sus derivados. `POST /hashimons` rechaza pedir un Genesis (422 `genesis_not_requestable`).
 
-| Elemento | Especie | Tipo |
-|---|---|---|
-| Fuego | `genesis_fuego` | fuego · Pure |
-| Agua | `genesis_agua` | agua · Pure |
-| Aire | `genesis_aire` | aire · Pure |
-| Tierra | `genesis_tierra` | tierra · Pure |
-| Electricidad | `genesis_electrico` | electrico · Pure |
+El **individuo es único** porque el servidor genera un `birthNonce` distinto y el ADN deriva color, rasgos y stats dentro de esa especie. Por diseño anti-grind, **no** puedes buscar un ADN «perfecto» antes de nacer, ni probar fechas hasta dar con el espíritu que quieres: la identidad se fija una sola vez.
 
-El **elemento es tu elección**; el **individuo es único** porque el servidor genera un `birthNonce` distinto y el ADN deriva color, rasgos y stats dentro de ese elemento.
-
-Por diseño anti-grind, **no** puedes buscar un ADN «perfecto» antes de nacer: el servidor emite el nonce. Lo que sí controlas es la **especie genesis**, que fija el tipo puro.
+Los cinco Genesis elementales de V1 (`genesis_fuego`, `genesis_agua`, `genesis_aire`, `genesis_tierra`, `genesis_electrico`) son **legacy**: las criaturas ya emitidas siguen verificando, pero no se emiten más. Una cuenta V1 pasa a V2 una sola vez con `POST /profile/birth`, que archiva su starter viejo y emite el nuevo en stage 1.
 
 Tras entrar al mundo, abre **Mi colección → Give life** cuando quieras renderizar tu Hashimon con tu IA.
 

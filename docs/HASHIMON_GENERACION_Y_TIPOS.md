@@ -2,7 +2,7 @@
 
 Paper técnico de referencia: cómo nace un Hashimon, cómo se determina su tipo elemental (fuego, metal, etc.), cómo se construye el prompt de imagen y qué es genético vs ganado por minería.
 
-> **Aviso de obsolescencia (2026-08-20):** este documento describe, en varias secciones, un cliente `game/Content/*.js` que **ya no existe en este repo**, y una lista de **13 tipos elementales** (con Robot/Plasma/Plant como fusiones) que fue reemplazada por el árbol canónico de **16 tipos** (índice hex 0-F). El sistema vigente hoy es `encubation-website/src/lib/compiler.ts` + su puerto Lua, y la fórmula de ADN Genesis cambió (ya no usa `templateId:birthNonce`). Para el estado actual de tipos, arquetipos y fórmula de ADN, usa [`ADN_PROPIEDAD_TEORIA_DE_JUEGO.md`](./ADN_PROPIEDAD_TEORIA_DE_JUEGO.md) como fuente de verdad — este archivo queda como referencia histórica del diseño del compilador y del sistema de prompts, que en buena parte sigue siendo conceptualmente válido.
+> **Aviso de obsolescencia (2026-08-20):** este documento describe, en varias secciones, un cliente `game/Content/*.js` que **ya no existe en este repo**, y una lista de **13 tipos elementales** (con Robot/Plasma/Plant como fusiones) que fue reemplazada por el árbol canónico de **16 tipos** (índice hex 0-F). El sistema vigente hoy es `genesis-portal/src/lib/compiler.ts` + su puerto Lua, y la especie Genesis ya no se elige: la fija la fecha de nacimiento (la fórmula de ADN sigue siendo `templateId:birthNonce:speciesKey`; la variante con `ownerPublicKey` está decidida pero no implementada). Para el estado actual de tipos, arquetipos y fórmula de ADN, usa [`ADN_PROPIEDAD_TEORIA_DE_JUEGO.md`](./ADN_PROPIEDAD_TEORIA_DE_JUEGO.md) como fuente de verdad — este archivo queda como referencia histórica del diseño del compilador y del sistema de prompts, que en buena parte sigue siendo conceptualmente válido.
 
 **Estado:** documentación del sistema actual  
 **Audiencia:** backend, frontend `game/`, integración 3D Luanti  
@@ -27,7 +27,7 @@ El **prompt de imagen no se guarda en base de datos**. Se **computa on-demand** 
 
 | Modo | Dónde nace | Quién genera `birthNonce` |
 |------|------------|---------------------------|
-| **Online** | `POST /hashimons` → [`api/src/modules/hashimon/domain/hashimons.ts`](../api/src/modules/hashimon/domain/hashimons.ts) | Servidor (`randomBytes(8)`) |
+| **Online** | `POST /hashimons` → [`src/modules/hashimon/domain/hashimons.ts`](../src/modules/hashimon/domain/hashimons.ts) | Servidor (`deriveBirthNonce`, HMAC con `BIRTH_SECRET`) |
 | **Offline** | `HashimonSystem.createInstance()` → [`game/Content/hashimonSystem.js`](../game/Content/hashimonSystem.js) | Cliente (encuentros) o catálogo |
 | **3D Luanti** | Sync roster vía `hashimon_core` HTTP | Servidor (misma fila PostgreSQL) |
 
@@ -74,40 +74,27 @@ flowchart LR
 
 ## 2. Nacimiento y emisión
 
-### 2.1 Online — servidor posee el nacimiento [repo `api/`]
+### 2.1 Online — servidor posee el nacimiento [repo `server/`]
 
 El cliente **solicita** una especie; el servidor **decide** la identidad individual.
 
 1. Cliente: `POST /hashimons` con `{ speciesKey, provenance?, name? }` ([`game/Content/hashimonApi.js`](../game/Content/hashimonApi.js) → `emitHashimon()`).
-2. Servidor: `emit()` valida la especie en [`api/src/modules/hashimon/data/species.ts`](../api/src/modules/hashimon/data/species.ts).
-3. Genera `birthNonce = randomBytes(8).toString("hex")`.
+2. Servidor: `emit()` valida la especie en [`src/modules/hashimon/data/species.ts`](../src/modules/hashimon/data/species.ts).
+3. Genera `birthNonce` con `deriveBirthNonce(ownerId, speciesKey, attempt)`: HMAC-SHA256 con `BIRTH_SECRET` sobre entropía aleatoria (8 bytes aleatorios crudos sólo si `BIRTH_SECRET` falta).
 4. Deriva `dna = Dna.derive(templateId, birthNonce, speciesKey)`.
 5. Inserta fila en `hashimons`; `dna` es **UNIQUE** (reintenta si colisión).
 
-```101:117:api/src/modules/hashimon/domain/hashimons.ts
-export async function emit(input: {
-  ownerId: string;
-  speciesKey: string;
-  templateId?: string;
-  provenance?: Provenance;
-  name?: string;
-}): Promise<HashimonRow> {
-  const species = Hashimons[input.speciesKey];
-  if (!species) {
-    throw new Error(`unknown species: ${input.speciesKey}`);
-  }
-  const templateId = input.templateId ?? species.templateId;
-  const provenance = input.provenance ?? "wild";
-
+```typescript
+// src/modules/hashimon/domain/hashimons.ts — emit()
   for (let attempt = 0; attempt < 5; attempt++) {
-    const birthNonce = randomBytes(8).toString("hex");
+    const birthNonce = deriveNonce(input.ownerId, input.speciesKey, attempt); // = deriveBirthNonce
     const dna = Dna.derive(templateId, birthNonce, input.speciesKey);
 ```
 
 **Reglas de emisión:**
 
-- `provenance: "starter"` — una sola emisión genesis por jugador (`countStarterEmissions`).
-- Especies `genesis_*` — elección de **elemento puro**; el individuo es único por el nonce del servidor.
+- `provenance: "starter"` — el Genesis que emite el registro o `POST /profile/birth`; una segunda identidad la bloquea `birth_already_set`, no un conteo de starters (`countStarterEmissions` existe pero ninguna ruta lo usa).
+- Especies Genesis — **no se piden**: `POST /hashimons` rechaza cualquier Genesis con 422 `genesis_not_requestable`. El Genesis lo emite el registro (`registerOwner`) o la migración `POST /profile/birth` (`rebirthWithBirthDate`) a partir de la fecha de nacimiento; el individuo sigue siendo único por el nonce del servidor.
 - Anti-grind: el cliente **no puede** buscar un ADN “perfecto” antes de nacer.
 
 ### 2.2 Offline — cliente `game/` [repo]
@@ -118,7 +105,7 @@ export async function emit(input: {
 
 ### 2.3 Esquema PostgreSQL — solo identidad + PoW
 
-[`api/src/modules/core/db/schema.sql`](../api/src/modules/core/db/schema.sql):
+[`src/modules/core/db/schema.sql`](../src/modules/core/db/schema.sql):
 
 | Columna | Rol |
 |---------|-----|
@@ -135,7 +122,7 @@ export async function emit(input: {
 
 ### 2.4 Vista API `present()`
 
-[`present()`](../api/src/modules/hashimon/domain/hashimons.ts) devuelve identidad + progresión derivada + bloque `pow` + `verified` (recomputación del share almacenado).
+[`present()`](../src/modules/hashimon/domain/hashimons.ts) devuelve identidad + progresión derivada + bloque `pow` + `verified` (recomputación del share almacenado).
 
 ---
 
@@ -150,7 +137,7 @@ ADN = SHA-256( templateId : birthNonce : speciesKey )  →  64 caracteres hex mi
 Implementación idéntica en cliente y servidor:
 
 - Cliente: [`game/Content/hashimonDNA.js`](../game/Content/hashimonDNA.js) — `derive()`
-- Servidor: [`api/src/modules/core/core/dna.ts`](../api/src/modules/core/core/dna.ts) — `Dna.derive()`
+- Servidor: [`src/modules/core/core/dna.ts`](../src/modules/core/core/dna.ts) — `Dna.derive()`
 
 Los nibbles se indexan desde **1** (convención white paper): `[1]` = primer dígito hex, `[64]` = último.
 
@@ -208,14 +195,15 @@ Detalle ampliado para jugadores: [HASHIMON_ADN_Y_EVOLUCION.md §3](./HASHIMON_AD
 | Ubicación | Contenido |
 |-----------|-----------|
 | [`game/Content/hashimons.js`](../game/Content/hashimons.js) | Catálogo completo: sprites, moves, `spriteStages` |
-| [`api/src/modules/hashimon/data/species.ts`](../api/src/modules/hashimon/data/species.ts) | Subset emisionable por servidor |
-| [`3d-world/mods/hashimon_entities/species.json`](../3d-world/mods/hashimon_entities/species.json) | Export 3D vía `scripts/export-species-for-voxel.cjs` |
+| [`src/modules/hashimon/data/species.ts`](../src/modules/hashimon/data/species.ts) | Subset emisionable por servidor |
+| [`luanti/mods/hashimon_entities/species.json`](../luanti/mods/hashimon_entities/species.json) | Export 3D vía `scripts/export-species-for-voxel.cjs` |
 
 ### 4.1 Ejemplos concretos
 
 | speciesKey | Nombre | Tipo | templateId | Notas |
 |------------|--------|------|------------|-------|
-| `genesis_fuego` | Ember Genesis | `fuego` · Pure | `template_genesis_fuego` | Starter servidor |
+| `g2_<spirit>_<element>` | — | el elemento de la Birth Identity | `genesisTemplateId(spirit, element)` | Starter servidor actual (60 celdas) |
+| `genesis_fuego` | Ember Genesis | `fuego` · Pure | `template_genesis_fuego` | **Legacy V1** — sólo verifica criaturas archivadas, no se emite |
 | `genesis_metal` | — | — | — | No existe; metal vía especies como `s002` |
 | `s002` | Bacon Brigade | `metal` | `template_metal_001` | Salvaje / calle |
 | `solarCub` | Solar Cub | `fuego` | `template_solar_001` | Zona `kitchen` |
@@ -409,14 +397,15 @@ hash = doubleSha256( "${dna}:${extranonce2}" )
 ### 8.2 Progresión
 
 ```
-tier = stars = stage = min( floor(bestShareBits / 4), 33 )
+tier = stars = floor(bestShareBits / 4)
+stage = min( 33, max(1, tier) )
 ```
 
 Cada estrella ≈ un nibble hex más de ceros a la izquierda (~16× más raro).
 
 ### 8.3 Combate
 
-`HashimonSystem.applyStageScaling()` — **+18% por stage** sobre `baseHp` y `baseStats` de la especie (`HashimonConfig.statGrowthPerStage = 0.18`).
+**Histórico:** `HashimonSystem.applyStageScaling()` (+18% por stage sobre `baseHp` y `baseStats`, `HashimonConfig.statGrowthPerStage = 0.18`) vivía en el cliente `game/`, que ya no existe. El servidor no tiene código de combate ni de escalado de stats.
 
 ### 8.4 Verificación
 
@@ -428,9 +417,9 @@ No hay cadena Bulbasaur → Ivysaur. **Mismo `speciesKey` y mismo ADN siempre.**
 
 ---
 
-## 9. Integración 3D Luanti [repo `3d-world/`]
+## 9. Integración 3D Luanti [repo `luanti/`]
 
-Mod: [`hashimon_entities`](../3d-world/mods/hashimon_entities/).
+Mod: [`hashimon_entities`](../luanti/mods/hashimon_entities/).
 
 | Dato API | Uso en mundo 3D |
 |----------|-----------------|
@@ -449,10 +438,13 @@ Sync: `hashimon_core` HTTP → roster del jugador → spawn en grid alrededor de
 
 ### 10.1 Genesis elemental (servidor)
 
-Cinco starters en [`api/src/modules/hashimon/data/species.ts`](../api/src/modules/hashimon/data/species.ts):
+Desde Birth Identity V2 el starter del servidor es un Genesis `g2_<spirit>_<element>` (12 espíritus × 5 elementos = 60 claves, generadas por `buildGenesisV2()` en [`src/modules/hashimon/data/species.ts`](../src/modules/hashimon/data/species.ts)) que fija la fecha de nacimiento del jugador; nadie lo elige.
+
+Las seis claves siguientes son **`LEGACY_GENESIS`** (el starter offline `s001` más los cinco Genesis elementales de V1): siguen en el allowlist sólo para que las criaturas ya emitidas (archivadas) sigan presentándose y verificando su PoW, y **no se pueden emitir de nuevo**:
 
 | speciesKey | Tipo | templateId |
 |------------|------|------------|
+| `s001` | pixel | `template_genesis_001` |
 | `genesis_fuego` | fuego | `template_genesis_fuego` |
 | `genesis_agua` | agua | `template_genesis_agua` |
 | `genesis_aire` | aire | `template_genesis_aire` |
@@ -514,9 +506,9 @@ Cinco starters en [`api/src/modules/hashimon/data/species.ts`](../api/src/module
 | `game/Content/hashimonPrompt.js` | Prompt + value sheet |
 | `game/Content/hashimons.js` | Catálogo cliente |
 | `game/Content/hashimonSystem.js` | Instancias, scaling, tier |
-| `api/src/modules/hashimon/domain/hashimons.ts` | Emisión servidor |
-| `api/src/modules/hashimon/data/species.ts` | Catálogo emisionable |
-| `api/src/modules/core/core/pow.ts` | Verificación shares |
+| `src/modules/hashimon/domain/hashimons.ts` | Emisión servidor |
+| `src/modules/hashimon/data/species.ts` | Catálogo emisionable |
+| `src/modules/core/core/pow.ts` | Verificación shares |
 
 ---
 

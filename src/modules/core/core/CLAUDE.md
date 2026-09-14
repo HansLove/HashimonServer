@@ -18,7 +18,7 @@ vectors so server and client stay byte-identical.
 ## Key Files
 
 - **sha256.ts** — Node's native digest, deliberately NOT the client's hand-rolled pure-JS SHA-256; only the hex output is required to match, not the implementation.
-- **pow.ts** — also defines the not-yet-wired `"legacy"` and `"bitcoin"` job modes and `hashBitcoinJob` (real Stratum-style header hashing) for a future phase; only `"bound"` mode is issued today.
+- **pow.ts** — besides `"bound"`, hashes the `"bitcoin"` job mode through `hashBitcoinJob` (real Stratum-style header hashing), which `mining/domain/mining.ts::issueJob` issues when `HASHIMON_MINING_MODE=bitcoin` and a block template is available (falling back to `"bound"` otherwise); `hashJob` still hashes `"legacy"`, but `issueJob` never issues that mode.
 
 ## Business Logic
 
