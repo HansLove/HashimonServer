@@ -242,4 +242,41 @@ describe("loadState / speak (against the local DB)", () => {
     assert.equal(result.freeTurnsLeft, 0);
     assert.equal(result.credits, 4, "config.chatCreditsPerTurn default = 1");
   });
+
+  //KNOWN BUG, left failing on purpose: speak() checks the balance with a plain read and then
+  //debits unconditionally, so two concurrent paid turns both clear decideCharge and overdraw.
+  it("speak: edge — two concurrent paid turns with credit for one never overdraw the balance", async () => {
+    const { player, hashimon } = await seedCreature({ credits: 1 });
+    for (let i = 0; i < 21; i++) {
+      await query(`INSERT INTO chat_turns (hashimon_id, role, content) VALUES ($1,'user',$2)`, [hashimon.id, `t${i}`]);
+    }
+
+    //Barrier: neither turn leaves the model call until both have passed the credit check,
+    //which pins the interleaving instead of hoping the scheduler produces it.
+    let arrived = 0;
+    let openBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => { openBarrier = resolve; });
+    const askModel = async (): Promise<ModelReply> => {
+      arrived++;
+      if (arrived === 2) openBarrier();
+      await barrier;
+      return { text: '{"reply":"pagado","action":"idle"}', inputTokens: 1, outputTokens: 1 };
+    };
+    const deps = { query, withTransaction, askModel };
+    const turn = (message: string) => speak({
+      hashimonId: hashimon.id, ownerId: player.id, name: "Petunia", dna: hashimon.dna,
+      spirit: null, element: null, stage: 1, message,
+    }, deps);
+
+    const outcomes = await Promise.allSettled([turn("primero"), turn("segundo")]);
+
+    const balance = await query<{ credits: number }>(`SELECT credits FROM players WHERE id = $1`, [player.id]);
+    assert.equal(Number(balance.rows[0]!.credits), 0, "one credit pays for exactly one turn, never a negative balance");
+    assert.equal(outcomes.filter((o) => o.status === "fulfilled").length, 1, "only one of the two turns is charged");
+    const rejected = outcomes.find((o): o is PromiseRejectedResult => o.status === "rejected");
+    assert.ok(
+      rejected?.reason instanceof ChatDenied && rejected.reason.code === "insufficient_credits",
+      "the losing turn is denied for insufficient credits"
+    );
+  });
 });
