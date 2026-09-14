@@ -15,9 +15,16 @@ esac
 
 cd "$root" || exit 0
 
-if ! out=$(pnpm exec tsc --noEmit 2>&1); then
-  printf 'tsc --noEmit failed after editing %s:\n%s\n' "$file" "$out" | head -n 40 >&2
-  exit 2
+# tsc cannot check one file without dropping tsconfig (and the @/ alias), so it checks the
+# whole project and only the edited file's errors block. Errors elsewhere are either
+# pre-existing or an expected mid-refactor state, and would crowd this file's out of view.
+rel=${file#"$root"/}
+if ! out=$(pnpm exec tsc --noEmit --pretty false 2>&1); then
+  mine=$(grep -F "$rel(" <<<"$out")
+  if [[ -n $mine ]]; then
+    printf 'tsc --noEmit failed in %s:\n%s\n' "$rel" "$mine" | head -n 40 >&2
+    exit 2
+  fi
 fi
 
 case "$file" in
