@@ -1,6 +1,9 @@
 ---
 paths:
   - "src/modules/payments/**"
+  - "src/modules/affiliate/**"
+  - "src/modules/companion/domain/chat.ts"
+  - "src/modules/core/db/schema.sql"
 ---
 
 # Credit purchases
@@ -20,7 +23,10 @@ that coins actually arrived is `payment_partially_paid` / `payment_over_paid` on
 event — nothing is stored on the row.
 
 **Credit purchases (`src/modules/payments/domain/payments.ts`, `credits_plans` + `payments` tables).**
-The only path by which `players.credits` ever moves. A request carries a **`sku`, never
+The only path by which credits enter from outside. Exactly three places move
+`players.credits`: this settle (credit), incubation (`createLot` debit, `closeLotById`
+refund) and companion chat (`companion/domain/chat.ts::speak` debit, which writes no
+`audit()` row). A request carries a **`sku`, never
 an amount** — `planFor()` reads the price, and the zod schema in
 `payments/http/routes/payments.ts` is `.strict()` so a smuggled `amount`/`price` is a 400 rather
 than a field quietly ignored. `payments` snapshots `sku`/`credits`/`amount_usd` at

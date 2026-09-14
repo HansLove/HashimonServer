@@ -9,10 +9,10 @@ never needs a data migration.
 - `hashimons::emit` — the only way a Hashimon row is created; server always owns the birth nonce.
 - `hashimons::present` — derives the client-facing view (stats/rank/verified) from `dna + pow`; nothing derived is ever stored.
 - `hashimons::getForOwner`, `hashimons::listByOwner`, `hashimons::countForOwner` — inventory reads.
-- `hashimons::isGenesisSpecies` — the starter gate `player/domain/players.ts::registerOwner` checks.
+- `hashimons::isGenesisSpecies` — lets `POST /hashimons` (`hashimon/http/routes/hashimons.ts`) refuse a body-supplied Genesis species; registration never calls it, it derives the species from the date of birth.
 
 ## Key Files
-- **../data/species.ts** — server-side species registry (identity + base stats). Its keys gate emission: a `speciesKey` absent from it can never be minted.
+- **../data/species.ts** — server-side species allowlist, nothing more. Its keys gate emission: a `speciesKey` absent from it can never be minted. It holds no stats, type or look — those were removed and are derived from DNA; never add them back here.
 
 ## Business Logic
 - **Server owns the birth.** `hashimons::emit` generates the birth nonce itself so a client can never grind for a rare DNA; on the astronomically unlikely `dna` unique-constraint collision (Postgres code `23505`) it retries with a new nonce up to 5 times.
@@ -23,7 +23,7 @@ never needs a data migration.
 
 **Internal:**
 - `@/modules/core/core` (`Dna`, `progressionOf`, `verifyStoredPow`) — the deterministic ruleset; this module calls it to verify/derive, never to decide game outcomes itself.
-- `@/modules/hashimon/data/species` (`Hashimons`) — species registry; gates which `speciesKey` values `emit` accepts.
+- `@/modules/hashimon/data/species` (`Hashimons`) — species allowlist; gates which `speciesKey` values `emit` accepts.
 - `@/modules/core/db/pool` (`query`, `withTransaction`) — `emit` wraps its INSERT + `audit()` call in one transaction so the audit trail can never desync from the mutation.
 - `@/modules/core/domain/audit` — every emission records itself.
 

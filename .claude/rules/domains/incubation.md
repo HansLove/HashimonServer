@@ -1,12 +1,14 @@
 ---
 paths:
   - "src/modules/incubation/**"
+  - "src/modules/core/db/schema.sql"
 ---
 
 # Assisted incubation
 
 **Assisted incubation (`src/modules/incubation/domain/incubation.ts`, `caos_pricing` + `caos_lots`).** The
-credit sink, and the second and last mover of `players.credits`. A request carries a
+main credit sink, one of the three movers of `players.credits` (with payments and
+`companion/domain/chat.ts::speak` — see payments.md). A request carries a
 **count, never an amount**; `GET /incubation/pricing` publishes the ladder **already net of
 the tier discount** (10-24 arrives as `9.8`, not `10` + `2%`) so a client cannot apply it
 twice. Seven server-decided statuses — `queued → assigned → mining → complete | partial |

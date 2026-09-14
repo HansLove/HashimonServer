@@ -20,12 +20,13 @@ the error-mapping details — not repeated here.
 
 ## Business Logic
 
-**`canOwn` (needs a `public_key`) gates three unrelated things** across three
+**`canOwn` (needs a `public_key`) gates four unrelated things** across three
 modules: emitting a Hashimon (`hashimon/http/routes/hashimons.ts`), claiming
-self-custody (`player/http/routes/wallet.ts`), and binding a Luanti session
-(`internal.ts` here). All three throw the same 403 `cannot_own` — a keyless player
-(anonymous `/session` or Luanti guest) cannot do any of them. Changing the gate means
-touching all three call sites, which is why it is documented in each.
+self-custody (`player/http/routes/wallet.ts`), binding a Luanti session
+(`internal.ts` here) and the V1 -> V2 rebirth (`player/domain/players.ts::rebirthWithBirthDate`,
+checked in the domain rather than the route). All four throw the same 403 `cannot_own` — a
+keyless player (anonymous `/session` or Luanti guest) cannot do any of them. Changing the
+gate means touching all four call sites (`grep -rn "canOwn(" src`).
 
 **The world polls, it does not push.** `GET /internal/luanti-auth` is hit roughly
 every 2s for *every* named account plus `can_own`; the mod answers the engine's

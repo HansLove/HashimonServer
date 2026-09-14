@@ -75,7 +75,9 @@ Import the router and `app.use(<domain>Router)` among the other domain routers:
 ## 5. Tables
 
 Append to `src/modules/core/db/schema.sql`. There are no migrations: the whole file is
-re-applied on every start, in production too, so every statement must be idempotent —
+re-applied on every start, in production too (the systemd unit's `ExecStartPre` runs
+`node dist/modules/core/db/migrate.js` in the image, see the `hashimon_server` IaC role),
+so every statement must be idempotent —
 `CREATE TABLE IF NOT EXISTS`, `CREATE [UNIQUE] INDEX IF NOT EXISTS`,
 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. Put a comment above each table or index stating
 the invariant it enforces (see the `caos_lots` indexes). Apply with `pnpm migrate:dev`.
@@ -126,8 +128,10 @@ If the domain moves `players.credits`, or touches custody material (encrypted ke
 salts):
 
 - Run the `money-flow-reviewer` agent over the diff before calling it done.
-- Update the statements about who moves credits in `.claude/rules/domains/payments.md`
-  and `.claude/rules/domains/incubation.md`, which enumerate the movers.
+- Update the statements about who moves credits in `.claude/rules/domains/payments.md`,
+  `.claude/rules/domains/incubation.md` and `src/modules/incubation/domain/CLAUDE.md`,
+  which enumerate the movers, and add the new mover's path to the `paths` frontmatter of
+  `payments.md` so its invariants load there.
 
 ## 11. Verify
 

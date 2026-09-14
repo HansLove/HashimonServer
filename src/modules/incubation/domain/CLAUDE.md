@@ -1,8 +1,8 @@
 # Incubation Domain
 
 ## Overview
-The credit sink and the second (and last) mover of `players.credits`, after
-payments. Buys "marks" (never say "shares" to a player) that CaosEngine's pool
+The main credit sink, and one of three movers of `players.credits` — the others
+are payments (settle) and `companion/domain/chat.ts::speak` (per-turn debit). Buys "marks" (never say "shares" to a player) that CaosEngine's pool
 mines against a creature's DNA; nothing this module receives from the pool is
 trusted — every mark is re-verified here before it counts.
 

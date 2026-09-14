@@ -7,7 +7,7 @@ the DB here is the only password store the engine ever sees.
 
 ## Entry Points
 - `players::findOrCreatePlayer` — create-or-restore identity by public key; anonymous if none given.
-- `players::registerOwner` — full web registration: validates species/username/password, mints a starter Hashimon and session in one flow. Also the claim path — see Business Logic.
+- `players::registerOwner` — full web registration: validates username/password/dob, derives the starter's species from the date of birth, mints the starter Hashimon and a session. Also the claim path — see Business Logic.
 - `players::loginOwner`, `players::playerForToken` — password login (argon2, or SRP for a Luanti-only guest) and bearer-token resolution used by `core/http/auth.ts`.
 - `players::canOwn` — the single gate deciding if a player may own creatures (has `public_key`).
 - `players::claimSelfCustody` — migrates an owner from server-held to self-held keys.
@@ -21,13 +21,14 @@ the DB here is the only password store the engine ever sees.
 - **`listLuantiAuthEntries` lists everyone, `can_own` decides ownership.** It returns every row with a username and a password entry, guests included, each carrying `can_own` — the mod needs guests in the mirror to authenticate them at all, so "present in the list" no longer means "is an owner".
 - **Ownership gate.** A player can only own creatures (`POST /hashimons`) if `public_key` is set (`players::canOwn`). Anonymous/guest players (Luanti without a key) can play but not own — enforced at the domain layer, not just HTTP.
 - **Custody model.** If the caller supplies their own `publicKey`, custody is `"player"` (server never sees the private key). If not, the server generates a keypair and encrypts the private key with a key derived from the account password (`crypto::encryptPrivateKey`) — custody `"server_encrypted"`. `players::claimSelfCustody` lets an owner migrate from server-held to self-held by wiping the encrypted blob.
-- **Genesis starters are gated twice.** `registerOwner` requires `speciesKey` to be in the hardcoded `GENESIS_KEYS` set AND pass `hashimon/domain/hashimons.ts::isGenesisSpecies` AND exist in the species table — belt-and-suspenders against a bad species key minting a rare creature as a "starter".
+- **The starter's species is never chosen.** `registerOwner` derives it from the date of birth (`core/core/birth-identity.ts::birthIdentityOf`), so a client cannot pick a rare Genesis. The body-supplied Genesis gate lives on `POST /hashimons` instead (`hashimon/http/routes/hashimons.ts`, via `isGenesisSpecies`).
+- **Registration is not one transaction.** The player `INSERT` (or the claim `UPDATE`) commits on its own; `emitStarterAndBindSession` then calls `emit()` and `createSession()` outside it and, on failure, runs a best-effort compensation (`DELETE` for a fresh row, revert-to-NULL for a claim) whose own error is swallowed. A crash between the two, or a failed compensation, leaves a half-registered account. A new write after the `INSERT` gets no rollback — add it to the compensation.
 
 ## Dependencies
 
 **Internal:**
-- `@/modules/hashimon/domain/hashimons` (`emit`, `isGenesisSpecies`) — `registerOwner` mints the starter creature through the same emission path everything else uses.
-- `@/modules/core/db/pool` (`query`, `withTransaction`) — registration and claims are transactional.
+- `@/modules/hashimon/domain/hashimons` (`emit`, `present`) — `registerOwner` mints the starter creature through the same emission path everything else uses.
+- `@/modules/core/db/pool` (`query`, `isUniqueViolation`) — plain autocommit queries; the only transaction in the flow is the one `emit` owns. Once-only claims rely on conditional `UPDATE ... WHERE` guards, not a transaction.
 - `@/modules/affiliate/domain/affiliates` (`resolveAffiliateCode`) — `registerOwner` resolves the optional `ref` against the affiliate table before inserting, so `players.referred_by` only ever holds an existing, active code; an invalid one becomes `null` and registration carries on.
 
 **External:**

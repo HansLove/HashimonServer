@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/modules/mining/**"
+  - "src/modules/core/db/schema.sql"
   - "src/modules/hashimon/**"
 ---
 
@@ -18,10 +19,13 @@ itself needs no migration.
 grind for a rare identity. `dna` is `UNIQUE` in the schema (the anti-duplication
 guarantee).
 
-**Mining jobs (`src/modules/mining/domain/mining.ts`, `mining_jobs` table).** `issueJob()` currently
-always writes `mode: 'bound'` with a fixed placeholder header (zeroed `prevHash`,
-`dna` as `merkleRoot`, static `bits`) — the row type also allows `'legacy'` and
-`'bitcoin'` modes for future real-target mining, not yet wired up. Jobs TTL out
+**Mining jobs (`src/modules/mining/domain/mining.ts`, `mining_jobs` table).** `issueJob()` writes
+`mode: 'bitcoin'` when `HASHIMON_MINING_MODE=bitcoin` and a node template is available
+(`block-template.ts::getPreparedTemplate`), and falls back to `mode: 'bound'` otherwise
+(enriched as `template_fallback: true`). Bound mode uses a fixed placeholder header (zeroed
+`prevHash`, `dna` as `merkleRoot`, static `bits`). `'legacy'` (the original client's
+mode) is still verified by `core/core/pow.ts` but no code writes it. Readers such as
+`mining.ts::rowToJob` and `pow.ts::verifyStoredPow` must keep handling all three. Jobs TTL out
 (`HASHIMON_JOB_TTL_MS`, default 15 min); `submitShare()` re-verifies every share
 server-side via `verifyJobShare` (never trust client-reported hashes) and dedupes
 accepted shares globally by hash (`submitted_shares` table, plus a DB unique
