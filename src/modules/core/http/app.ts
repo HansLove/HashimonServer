@@ -15,6 +15,7 @@ import { walletRouter } from "@/modules/player/http/routes/wallet";
 import { magiRouter } from "@/modules/magi/http/routes/magi";
 import { paymentsRouter } from "@/modules/payments/http/routes/payments";
 import { affiliateRouter } from "@/modules/affiliate/http/routes/affiliate";
+import { adminRouter } from "@/modules/player/http/routes/admin";
 import { paymentsWebhookRouter } from "@/modules/payments/http/routes/payments-webhook";
 import { incubationRouter } from "@/modules/incubation/http/routes/incubation";
 import { incubationWebhookRouter } from "@/modules/incubation/http/routes/incubation-webhook";
@@ -57,6 +58,7 @@ export function createApp(logger?: Logger) {
   app.use(chatRouter);
   app.use(walletRouter);
   app.use(affiliateRouter);
+  app.use(adminRouter);
   app.use(magiRouter);
   app.use(paymentsRouter);
   app.use(incubationRouter);

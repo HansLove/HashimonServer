@@ -93,6 +93,10 @@ export const config = {
   // portal: el enlace lleva clientes a registrarse, no a la oficina del afiliado.
   publicSiteUrl: (process.env.PUBLIC_SITE_URL ?? "https://ihashima.com").replace(/\/+$/, ""),
   luantiServerSecret: process.env.LUANTI_SERVER_SECRET ?? "",
+  // Read-only admin surface (GET /admin/players) for the Taloon back office. Its own
+  // secret on purpose: LUANTI_SERVER_SECRET mints sessions and moves MAGI, this one
+  // only reads a roster. Empty = the admin routes answer 503, never open.
+  adminApiSecret: process.env.ADMIN_API_SECRET ?? "",
   // Hace AUDITABLE la semilla de nacimiento: con ella, cada birth_nonce es
   // recomputable desde su entrada, así que el servidor puede demostrar que no
   // molió nonces para fabricar una criatura rara. Vacío = randomBytes puro; se
