@@ -88,11 +88,28 @@ src/modules/
                 (pow_yield: the Hashi-croquetas creatures and towns both eat), vibing.ts
                 (tower projection whose map zone decides a harvest's tier),
                 block-template.ts, bitcoin-address.ts.
+  cards/        Core subdomain — la carta de cada hallazgo (cards.hash UNIQUE = el
+                suministro: un hash, una carta, para siempre). levels.ts (la
+                escalera de 99, DEL JUGADOR: quemar esencia sube nivel y cada 10
+                otorga una mutación), fusion.ts (N iguales → 1 superior, con el
+                linaje como recibo verificable), data/recipes.ts,
+                rules-version.ts (la versión de las reglas = SHA-256 de su contenido;
+                cada carta la sella en cards.rules_version y la publica en
+                rules_versions — cambiar un peso cambia la versión sola).
+                stickers.ts (la estampa de cada marca comprada: instantánea si es
+                común, capullo si cae en una banda de data/maturation.ts, que
+                madura con el bloque h siguiente al prevHash de la marca; GET
+                /cards/cocoons la madura al leerla, sin cron).
+                V1 soulbound: sin sello ni notario, eso es V2.
   incubation/   Core subdomain — the lot ledger (the credit sink) and caos-client.ts,
                 the single outbound call.
   player/       Identity + bearer sessions, crypto.ts, and the auth / session / wallet /
                 profile routers.
   payments/     Charges + webhook transitions, credit-plans.ts (the catalogue — where a
+                pack-bonus.ts + block-oracle.ts: el EXTRA del paquete, decidido por
+                el hash de un bloque futuro de Bitcoin (dos exploradores públicos
+                deben coincidir; el nodo, si está, verifica). Cuarto mover de
+                players.credits — sólo suma, nunca retiene el piso.
                 price comes from).
   affiliate/    Two-level affiliate book — referral codes resolved at /register,
                 commissions accrued inside the payment's settle transaction, and the

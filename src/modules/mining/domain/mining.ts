@@ -19,6 +19,7 @@ import {
 import { getPreparedTemplate } from "@/modules/mining/domain/block-template";
 import { harvestPlaceForPlayer, bumpHeat } from "@/modules/mining/domain/vibing";
 import { foodFor, foodByKey } from "@/modules/mining/domain/foods";
+import { mintFromYield } from "@/modules/cards/domain/cards";
 import type { HashimonRow } from "@/modules/hashimon/domain/hashimons";
 import { enrich } from "@/modules/core/http/wide-event";
 
@@ -201,19 +202,9 @@ export async function submitShare(
   let hashDelta = 0;
   try {
     const outcome = await withTransaction(async (client: DbClient) => {
-      await query(
-        `INSERT INTO submitted_shares (hash, hashimon_id, job_id, bits, extranonce2, nonce)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [result.hash, row.id, job.id, result.bits, body.extranonce2, body.nonce],
-        client
-      );
-
-      hashDelta = typeof body.totalHashesAttempted === "number" && body.totalHashesAttempted > 0
-        ? body.totalHashesAttempted
-        : 0;
-      const newExtranonce2 = Math.max(Number(row.extranonce2), body.extranonce2 + 1);
-      const updateBest = result.bits > row.best_share_bits;
-      isNewBest = updateBest;
+      //Captured before the insert because every bitcoin-mode share keeps its template, not
+      //only the best one: the job row expires and takes the template with it. Null in bound
+      //mode, where the preimage re-derives from the DNA and the nonces in this row.
       const bitcoinSnapshot: BitcoinShareSnapshot | null =
         job.mode === "bitcoin" && job.bitcoin
           ? {
@@ -228,6 +219,28 @@ export async function submitShare(
               nTimeHex: job.header.timestamp.toString(16).padStart(8, "0"),
             }
           : null;
+
+      await query(
+        `INSERT INTO submitted_shares (hash, hashimon_id, job_id, bits, extranonce2, nonce, template)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          result.hash,
+          row.id,
+          job.id,
+          result.bits,
+          body.extranonce2,
+          body.nonce,
+          bitcoinSnapshot ? JSON.stringify(bitcoinSnapshot) : null,
+        ],
+        client
+      );
+
+      hashDelta = typeof body.totalHashesAttempted === "number" && body.totalHashesAttempted > 0
+        ? body.totalHashesAttempted
+        : 0;
+      const newExtranonce2 = Math.max(Number(row.extranonce2), body.extranonce2 + 1);
+      const updateBest = result.bits > row.best_share_bits;
+      isNewBest = updateBest;
 
       const updateRes = await query<HashimonRow>(
         `UPDATE hashimons SET
@@ -369,6 +382,15 @@ export async function submitYield(row: HashimonRow, body: YieldSubmitBody): Prom
          body.extranonce2, body.nonce, spot.place, food.key],
         client
       );
+      //La carta del hallazgo viaja en la MISMA transacción, por la misma razón
+      //que el audit: un hallazgo sin su carta sería trabajo que el jugador hizo
+      //y no puede usar. Idempotente por `cards.hash UNIQUE`.
+      await mintFromYield(client, {
+        hash,
+        ownerId: row.owner_id,
+        tier,
+        itemKey: food.key,
+      });
       await bumpHeat(spot, client);
       await audit(client, {
         playerId: row.owner_id,

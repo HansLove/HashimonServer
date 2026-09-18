@@ -17,7 +17,7 @@ import {
   type CaosSharePayload,
   type LotRow,
 } from "@/modules/incubation/domain/incubation";
-import { hashBitcoinJob, leadingZeroBits } from "@/modules/core/core/index";
+import { hashBitcoinJob, leadingZeroBits, type BitcoinShareSnapshot } from "@/modules/core/core/index";
 import { present } from "@/modules/hashimon/domain/hashimons";
 import { pool, query } from "@/modules/core/db/pool";
 import { AppError } from "@/modules/core/http/errors";
@@ -335,20 +335,79 @@ describe("the lot ledger (against the local DB)", () => {
     //A creature the golden coinbase does not commit to would be rejected on DNA, so this
     //case is exercised with the committed one below; here the point is the index itself.
     const first = await query(
-      `INSERT INTO submitted_shares (hash, hashimon_id, job_id, bits, extranonce2, nonce, origin, caos_lot_id, share_index)
-       VALUES ('dup-test-hash', $1, NULL, 3, NULL, 0, 'caos', $2, 0)
+      `INSERT INTO submitted_shares (hash, hashimon_id, job_id, bits, extranonce2, nonce, origin, caos_lot_id, share_index, template)
+       VALUES ('dup-test-hash', $1, NULL, 3, NULL, 0, 'caos', $2, 0, '{}')
        ON CONFLICT DO NOTHING RETURNING hash`,
       [lot.hashimon_id, lot.id]
     );
     assert.equal(first.rows.length, 1);
     //Same position in the same lot, a different hash: still refused.
     const second = await query(
-      `INSERT INTO submitted_shares (hash, hashimon_id, job_id, bits, extranonce2, nonce, origin, caos_lot_id, share_index)
-       VALUES ('dup-test-hash-other', $1, NULL, 3, NULL, 0, 'caos', $2, 0)
+      `INSERT INTO submitted_shares (hash, hashimon_id, job_id, bits, extranonce2, nonce, origin, caos_lot_id, share_index, template)
+       VALUES ('dup-test-hash-other', $1, NULL, 3, NULL, 0, 'caos', $2, 0, '{}')
        ON CONFLICT DO NOTHING RETURNING hash`,
       [lot.hashimon_id, lot.id]
     );
     assert.equal(second.rows.length, 0);
+  });
+
+  //docs/ESTAMPAS_V1.md §11: the template is thrown away once verified unless it is stored
+  //with the mark. What is pinned here is the property an outsider needs — the row alone,
+  //with no pool and no job, rebuilds to the hash it claims.
+  it("keeps the full template of every mark, so the row alone recomputes it", async () => {
+    const { lot } = await openLot(2, 500, committedDna(8));
+    const marks = [minedShare(90_001, { shareIndex: 0 }), minedShare(90_002, { shareIndex: 1 })];
+    for (const mark of marks) {
+      const applied = await applyShare(lot, mark);
+      assert.equal(applied.ok, true);
+    }
+
+    const rows = await query<{ hash: string; nonce: string; template: BitcoinShareSnapshot | null }>(
+      `SELECT hash, nonce, template FROM submitted_shares WHERE caos_lot_id = $1 ORDER BY share_index`,
+      [lot.id]
+    );
+    //Every mark, not only the best one: that is the whole difference with best_share_bitcoin.
+    assert.equal(rows.rows.length, 2);
+    for (const stored of rows.rows) {
+      const template = stored.template;
+      assert.ok(template, "a caos mark was stored without its template");
+      const { hashBE } = hashBitcoinJob({
+        ...template,
+        extranonce1: template.extranonce1!,
+        extranonce2: template.extranonce2!,
+        nonceHex: Number(stored.nonce).toString(16).padStart(8, "0"),
+      });
+      assert.equal(hashBE, stored.hash);
+
+      //Y cada marca dio su estampa: una carta al instante, o un capullo que espera el
+      //bloque siguiente a su prevHash (docs/ESTAMPAS_V1.md). Nunca las dos, nunca ninguna.
+      const card = await query(`SELECT 1 FROM cards WHERE hash = $1`, [stored.hash]);
+      const cocoon = await query<{ prev_hash: string }>(
+        `SELECT prev_hash FROM sticker_cocoons WHERE mark_hash = $1`,
+        [stored.hash]
+      );
+      assert.equal(card.rows.length + cocoon.rows.length, 1);
+      if (cocoon.rows[0]) {
+        assert.equal(cocoon.rows[0].prev_hash, template.prevhashBE);
+      }
+      //La despensa sigue a la estampa: fila con el ítem de la carta, o ninguna si es capullo.
+      const pantry = await query<{ food_key: string }>(`SELECT food_key FROM pow_yield WHERE hash = $1`, [stored.hash]);
+      assert.equal(pantry.rows.length, card.rows.length);
+    }
+  });
+
+  it("refuses to store a caos mark without its template", async () => {
+    const { lot } = await openLot(1, 500, "ad".repeat(32));
+    await assert.rejects(
+      () =>
+        query(
+          `INSERT INTO submitted_shares (hash, hashimon_id, job_id, bits, extranonce2, nonce, origin, caos_lot_id, share_index)
+           VALUES ('no-template-hash', $1, NULL, 3, NULL, 0, 'caos', $2, 0)`,
+          [lot.hashimon_id, lot.id]
+        ),
+      (err: { code?: string; constraint?: string }) =>
+        err.code === "23514" && err.constraint === "submitted_shares_caos_template"
+    );
   });
 
   it("refuses a mark whose hash does not survive recomputation", async () => {

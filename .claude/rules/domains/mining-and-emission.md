@@ -29,4 +29,6 @@ mode) is still verified by `core/core/pow.ts` but no code writes it. Readers suc
 (`HASHIMON_JOB_TTL_MS`, default 15 min); `submitShare()` re-verifies every share
 server-side via `verifyJobShare` (never trust client-reported hashes) and dedupes
 accepted shares globally by hash (`submitted_shares` table, plus a DB unique
-constraint as the second line of defense against races).
+constraint as the second line of defense against races). A bitcoin-mode share also stores its `BitcoinShareSnapshot` in `submitted_shares.template`
+(the job row, and the template with it, expires); bound shares store NULL there because their
+preimage re-derives from the DNA and the nonces already in the row.

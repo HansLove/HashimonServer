@@ -7,7 +7,8 @@ paths:
 # Assisted incubation
 
 **Assisted incubation (`src/modules/incubation/domain/incubation.ts`, `caos_pricing` + `caos_lots`).** The
-main credit sink, one of the three movers of `players.credits` (with payments and
+main credit sink, one of the four movers of `players.credits` (with the payment settle,
+the pack bonus `payments/domain/pack-bonus.ts::resolveBonus`, and
 `companion/domain/chat.ts::speak` — see payments.md). A request carries a
 **count, never an amount**; `GET /incubation/pricing` publishes the ladder **already net of
 the tier discount** (10-24 arrives as `9.8`, not `10` + `2%`) so a client cannot apply it
@@ -24,7 +25,7 @@ creature it ever mined for. Drop the third and the first two still pass for a he
 change nothing. The floor is read off the recomputed hash; the payload's own `stars` and
 `leadingZeros` are just more numbers a pool reported. The mark is stored in
 `hashimons.best_share_bitcoin` — carrying spoon's own `extranonce1`/`extranonce2`, which
-are *not* derivable from the DNA — so `present()` re-verifies it like any browser share.
+are *not* derivable from the DNA — so `present()` re-verifies it like any browser share. **Every** mark's template is also stored in `submitted_shares.template` (not only the best one): it is thrown away once verified otherwise, and without it no one outside this server can recompute a mark or know the `prevHash` its maturing sticker waits on (docs/ESTAMPAS_V1.md §4.5, §11). `submitted_shares_caos_template` (`CHECK … NOT VALID`) refuses a caos mark without it; rows that predate the column have none and never will.
 
 **`presentLot.mutated` is a stored fact, not a derivation.** `applyShare` sets it when a mark
 actually raises the creature's *star* count, under a `FOR UPDATE` on the creature row so the

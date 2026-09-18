@@ -17,7 +17,7 @@ import {
 } from "@/modules/player/domain/crypto";
 import { emit, present, type HashimonRow } from "@/modules/hashimon/domain/hashimons";
 import { resolveAffiliateCode } from "@/modules/affiliate/domain/affiliates";
-import { birthIdentityOf, isPlausibleDob, type BirthIdentity } from "@/modules/core/core/birth-identity";
+import { birthIdentityOf, composeDob, isPlausibleDob, isPlausibleMonthDay, spiritOf, spiritOfMonthDay, type BirthIdentity } from "@/modules/core/core/birth-identity";
 
 export interface Player {
   id: string;
@@ -32,8 +32,10 @@ export interface Player {
   kdf_salt: string | null;
   kdf_params: Record<string, unknown> | null;
   custody: string | null;
-  //Birth Identity V2. La fecha que los produjo NO se guarda.
+  //Birth Identity V2. La fecha completa NO se guarda; mes/día sí (espíritu).
   birth_spirit: string | null;
+  birth_month: number | null;
+  birth_day: number | null;
   life_number: number | null;
   genesis_element: string | null;
   birth_version: number | null;
@@ -69,8 +71,12 @@ export function presentPlayer(player: Player) {
     //al espíritu deja la fecha real en ~3 candidatos si se conoce el año
     //(medido sobre 1970-2018), contra ~31 publicando sólo el espíritu.
     birthSpirit: player.birth_spirit,
+    birthMonth: player.birth_month,
+    birthDay: player.birth_day,
     genesisElement: player.genesis_element,
     lifeNumber: player.life_number,
+    /** False until POST /profile/element seals year → life/element → Genesis. */
+    elementAwakened: player.life_number != null,
   };
 }
 
@@ -195,7 +201,10 @@ export async function playerForToken(token: string): Promise<Player | null> {
 export async function registerOwner(input: {
   username: string;
   password: string;
-  dob: string;
+  /** Day of birth (1–31). With month, seals spirit only — no year. */
+  birthDay: number;
+  /** Month of birth (1–12). */
+  birthMonth: number;
   publicKey?: string;
   custody?: Custody;
   //El código de afiliado que venía en la URL (?ref=). Opcional siempre: un
@@ -206,7 +215,7 @@ export async function registerOwner(input: {
 }): Promise<{
   player: Player;
   session: Session;
-  hashimon: ReturnType<typeof present>;
+  hashimon: null;
   created: true;
   claimed: boolean;
 }> {
@@ -217,12 +226,11 @@ export async function registerOwner(input: {
   if (input.password.length < 8) {
     throw new AppError(422, "password must be at least 8 characters", "invalid_password");
   }
-  if (!isPlausibleDob(input.dob)) {
-    throw new AppError(422, "dob must be a real calendar date (YYYY-MM-DD), 1900 or later, not in the future", "invalid_dob");
+  if (!isPlausibleMonthDay(input.birthMonth, input.birthDay)) {
+    throw new AppError(422, "birth day/month must be a real calendar date", "invalid_birth_day");
   }
-  const identity = birthIdentityOf(input.dob);
-  //Sólo los derivados llegan al log. La fecha nunca.
-  enrich({ birth_spirit: identity.spirit, life_number: identity.lifeNumber, genesis_element: identity.element });
+  const spirit = spiritOfMonthDay(input.birthMonth, input.birthDay);
+  enrich({ birth_spirit: spirit, element_awakened: false });
 
   const existing = await getPlayerByUsername(username);
   if (existing) {
@@ -231,7 +239,7 @@ export async function registerOwner(input: {
     if (existing.password_hash || existing.public_key) {
       throw new AppError(409, "username already registered", "username_taken");
     }
-    return claimLuantiGuest(existing, input, identity);
+    return claimLuantiGuest(existing, input, spirit);
   }
 
   const keyMaterial = await deriveOwnerKeyMaterial(input);
@@ -256,10 +264,10 @@ export async function registerOwner(input: {
       `INSERT INTO players (
          username, password_hash, luanti_password, public_key, display_name,
          enc_private_key, kdf_salt, kdf_params, custody,
-         birth_spirit, life_number, genesis_element, birth_version, birth_set_at,
+         birth_spirit, birth_month, birth_day,
          referred_by, referred_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, now(),
-                 $14, CASE WHEN $14::text IS NULL THEN NULL ELSE now() END)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12,
+                 $13, CASE WHEN $13::text IS NULL THEN NULL ELSE now() END)
        RETURNING *`,
       [
         username,
@@ -271,10 +279,9 @@ export async function registerOwner(input: {
         keyMaterial.kdfSalt,
         keyMaterial.kdfParams ? JSON.stringify(keyMaterial.kdfParams) : null,
         keyMaterial.custody,
-        identity.spirit,
-        identity.lifeNumber,
-        identity.element,
-        identity.version,
+        spirit,
+        input.birthMonth,
+        input.birthDay,
         referredBy,
       ]
     );
@@ -289,24 +296,34 @@ export async function registerOwner(input: {
     throw err;
   }
 
-  const { session, hashimon } = await emitStarterAndBindSession(player, identity, () =>
-    query(`DELETE FROM players WHERE id = $1`, [player.id])
-  );
-  return { player, session, hashimon, created: true, claimed: false };
+  // Ritual 1: cuenta + espíritu. Genesis (ADN) llega en POST /profile/element.
+  try {
+    const session = await createSession(player.id);
+    enrich({ player_id: player.id, starter_emitted: false });
+    return { player, session, hashimon: null, created: true, claimed: false };
+  } catch (err) {
+    await query(`DELETE FROM players WHERE id = $1`, [player.id]).catch(() => {});
+    throw err;
+  }
 }
 
 /** Give a Luanti-only guest row (no password_hash, no public_key) what registerOwner
- *  would have given a brand-new account — keypair/custody and a starter — without
- *  touching luanti_password: it's the same password, already verified against the
- *  SRP entry the engine built for it in-game. */
+ *  would have given a brand-new account — keypair/custody and spirit — without
+ *  touching luanti_password. Genesis waits for /profile/element. */
 async function claimLuantiGuest(
   existing: Player,
-  input: { password: string; publicKey?: string; custody?: Custody },
-  identity: BirthIdentity
+  input: {
+    password: string;
+    birthDay: number;
+    birthMonth: number;
+    publicKey?: string;
+    custody?: Custody;
+  },
+  spirit: string
 ): Promise<{
   player: Player;
   session: Session;
-  hashimon: ReturnType<typeof present>;
+  hashimon: null;
   created: true;
   claimed: true;
 }> {
@@ -328,8 +345,7 @@ async function claimLuantiGuest(
       `UPDATE players
           SET password_hash = $2, public_key = $3, enc_private_key = $4,
               kdf_salt = $5, kdf_params = $6::jsonb, custody = $7,
-              birth_spirit = $8, life_number = $9, genesis_element = $10,
-              birth_version = $11, birth_set_at = now()
+              birth_spirit = $8, birth_month = $9, birth_day = $10
         WHERE id = $1 AND password_hash IS NULL AND public_key IS NULL
         RETURNING *`,
       [
@@ -340,10 +356,9 @@ async function claimLuantiGuest(
         keyMaterial.kdfSalt,
         keyMaterial.kdfParams ? JSON.stringify(keyMaterial.kdfParams) : null,
         keyMaterial.custody,
-        identity.spirit,
-        identity.lifeNumber,
-        identity.element,
-        identity.version,
+        spirit,
+        input.birthMonth,
+        input.birthDay,
       ]
     );
     const row = claimedRow.rows[0];
@@ -360,18 +375,21 @@ async function claimLuantiGuest(
     throw err;
   }
 
-  const { session, hashimon } = await emitStarterAndBindSession(player, identity, () =>
-    query(
+  try {
+    const session = await createSession(player.id);
+    enrich({ player_id: player.id, starter_emitted: false, claimed: true });
+    return { player, session, hashimon: null, created: true, claimed: true };
+  } catch (err) {
+    await query(
       `UPDATE players
           SET password_hash = NULL, public_key = NULL, enc_private_key = NULL,
               kdf_salt = NULL, kdf_params = NULL, custody = NULL,
-              birth_spirit = NULL, life_number = NULL, genesis_element = NULL,
-              birth_version = NULL, birth_set_at = NULL
+              birth_spirit = NULL, birth_month = NULL, birth_day = NULL
         WHERE id = $1`,
       [player.id]
-    )
-  );
-  return { player, session, hashimon, created: true, claimed: true };
+    ).catch(() => {});
+    throw err;
+  }
 }
 
 /** Validates + derives the keypair/custody/encrypted-blob triad shared by a fresh
@@ -516,6 +534,99 @@ export async function rebirthWithBirthDate(
   });
   enrich({ rebirth_archived: archived.rowCount ?? 0, hashimon_id: row.id });
   return { hashimon: present(row), archived: archived.rowCount ?? 0, identity };
+}
+
+/**
+ * Ritual 2: year → life number + natural element → emit Genesis.
+ * Requires spirit already set at register (birth_spirit + birth_month/day) and
+ * life_number still null. The year is never stored.
+ */
+export async function awakenElement(
+  player: Player,
+  input: { year: number } | { dob: string }
+): Promise<{ hashimon: ReturnType<typeof present>; identity: BirthIdentity; player: Player }> {
+  if (!canOwn(player)) {
+    throw new AppError(403, "cannot own without a public key — register on the web", "cannot_own");
+  }
+  if (!player.birth_spirit) {
+    throw new AppError(422, "set spirit first (register with day/month)", "spirit_required");
+  }
+  if (player.life_number != null) {
+    throw new AppError(409, "element already awakened and cannot be changed", "element_already_set");
+  }
+
+  let dob: string;
+  if ("dob" in input) {
+    dob = input.dob;
+    if (!isPlausibleDob(dob)) {
+      throw new AppError(422, "dob must be a real calendar date (YYYY-MM-DD), 1900 or later, not in the future", "invalid_dob");
+    }
+    if (spiritOf(dob) !== player.birth_spirit) {
+      throw new AppError(422, "date does not match your sealed spirit", "spirit_mismatch");
+    }
+  } else {
+    const month = player.birth_month;
+    const day = player.birth_day;
+    if (month == null || day == null) {
+      throw new AppError(422, "birth day/month missing — send full dob instead", "birth_day_missing");
+    }
+    const year = input.year;
+    if (!Number.isInteger(year) || year < 1900) {
+      throw new AppError(422, "year must be an integer >= 1900", "invalid_year");
+    }
+    dob = composeDob(year, month, day);
+    if (!isPlausibleDob(dob)) {
+      throw new AppError(422, "year + stored day/month is not a valid past date", "invalid_dob");
+    }
+  }
+
+  const identity = birthIdentityOf(dob);
+  if (identity.spirit !== player.birth_spirit) {
+    throw new AppError(422, "date does not match your sealed spirit", "spirit_mismatch");
+  }
+  enrich({
+    birth_spirit: identity.spirit,
+    life_number: identity.lifeNumber,
+    genesis_element: identity.element,
+  });
+
+  const dobParts = dob.match(/^(\d{4})-(\d{2})-(\d{2})$/)!;
+  const month = Number(dobParts[2]);
+  const day = Number(dobParts[3]);
+
+  // life_number IS NULL closes the race between two concurrent awakens.
+  const sealed = await query<Player>(
+    `UPDATE players
+        SET life_number = $2, genesis_element = $3,
+            birth_version = $4, birth_set_at = now(),
+            birth_month = COALESCE(birth_month, $5),
+            birth_day = COALESCE(birth_day, $6)
+      WHERE id = $1 AND birth_spirit IS NOT NULL AND life_number IS NULL
+      RETURNING *`,
+    [player.id, identity.lifeNumber, identity.element, identity.version, month, day]
+  );
+  if (!sealed.rows[0]) {
+    throw new AppError(409, "element already awakened and cannot be changed", "element_already_set");
+  }
+
+  // Should not already have an active starter; if somehow present, archive first.
+  await query(
+    `UPDATE hashimons
+        SET archived_at = now(), archive_reason = 'element_awaken'
+      WHERE owner_id = $1 AND archived_at IS NULL AND provenance = 'starter'`,
+    [player.id]
+  );
+
+  const row = await emit({
+    ownerId: player.id,
+    speciesKey: identity.speciesKey,
+    templateId: identity.templateId,
+    provenance: "starter",
+    birthSpirit: identity.spirit,
+    lifeNumber: identity.lifeNumber,
+  });
+  enrich({ starter_emitted: true, hashimon_id: row.id });
+  return { hashimon: present(row), identity, player: sealed.rows[0]! };
 }
 
 export async function loginOwner(username: string, password: string): Promise<{

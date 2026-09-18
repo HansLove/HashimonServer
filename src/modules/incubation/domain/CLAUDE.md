@@ -1,8 +1,10 @@
 # Incubation Domain
 
 ## Overview
-The main credit sink, and one of three movers of `players.credits` — the others
-are payments (settle) and `companion/domain/chat.ts::speak` (per-turn debit). Buys "marks" (never say "shares" to a player) that CaosEngine's pool
+The main credit sink, and one of four movers of `players.credits` — the others
+are payments (settle), the pack bonus (`payments/domain/pack-bonus.ts::resolveBonus`,
+credit after 3 confirmations of a Bitcoin block) and `companion/domain/chat.ts::speak`
+(per-turn debit). Buys "marks" (never say "shares" to a player) that CaosEngine's pool
 mines against a creature's DNA; nothing this module receives from the pool is
 trusted — every mark is re-verified here before it counts.
 
@@ -26,6 +28,20 @@ replay a mark across every creature), (3) the recomputed hash clears
 `stars_requested * BITS_PER_STAR` (else a `nonce: 0` header with the right DNA
 would pass the first two checks for free). The payload's own `stars`/
 `leadingZeros` fields are just more numbers the pool reported — never trusted.
+
+**The template is kept, per mark.** `applyShare` stores the verified
+`BitcoinShareSnapshot` in `submitted_shares.template` in the same insert as the mark —
+the only moment it exists. A `CHECK … NOT VALID` refuses a caos row without it.
+
+**Every verified mark gives a sticker, in the same transaction.** `applyShare` calls
+`cards/domain/stickers.ts::mintFromMark` with the mark hash and its `prevhashBE`: a card
+at once for a common roll, or a `sticker_cocoons` row that matures with block h. Keyed by
+the mark hash on both tables, so a redelivery cannot give a second sticker. **The
+pantry follows the sticker** (decision 18 Sept): `mintFromMark` writes the `pow_yield`
+row with the sticker's own tier and item — no more fixed `incubation` croqueta. A cocoon
+writes nothing to the pantry until it matures (`matureCocoon` does it then, from the
+creature/bits/nonce/place saved on the cocoon row), because until then nobody knows
+what it is.
 
 **Pricing is published pre-discounted.** `caos_pricing` stores list price +
 discount so an operator can `UPDATE` a readable row, but `pricingTiers()` and
