@@ -114,6 +114,8 @@ Internal Luanti routes need `X-Luanti-Secret: <LUANTI_SERVER_SECRET>`.
 | GET | `/payments/btcpay-server/invoice/:orderId` | ✓ | one charge — what the client polls |
 | POST | `/payments/btcpay-server/invoice/:orderId/cancel` | ✓ | give up on a `waiting` charge — **409 `payment_in_flight`** once coins are on the wire |
 | POST | `/payments/btcpay-server/webhook` | HMAC | BTCPay callback — **401** on a bad signature |
+| GET | `/payments/bonuses` | ✓ | the player's pack bonuses; **reading advances them** (commits a future Bitcoin block height, resolves after 3 confirmations). Each carries `targetHeight`, `blockHash`, `roll` and `rulesVersion` so anyone can recompute it (docs/BONO_VERIFICABLE_V1.md) |
+| GET | `/cards/cocoons` | ✓ | the player's sticker cocoons (the valuable stickers of a purchased mark: mutágeno and the épica band); **reading matures them** once block h = height(prevHash)+1 exists. Each carries `prevHash`, `targetHeight`, `blockHash`, `itemKey` and `rulesVersion` so anyone can recompute it (docs/ESTAMPAS_V1.md §4.5) |
 | GET | `/incubation/pricing` | – | the mark ladder (`creditsPerShare` already net of the tier discount) |
 | POST | `/hashimons/:id/incubation` | ✓ | open a lot of `shares` marks — **409 `incubation_pending`** if one is already live |
 | GET | `/hashimons/:id/incubation` | ✓ | the live lot, or the one that just closed; **204** when there is neither |

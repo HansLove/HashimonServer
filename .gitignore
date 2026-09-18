@@ -1,5 +1,4 @@
 node_modules/
-.env
 *.log
 dist/
 .DS_Store
@@ -7,3 +6,4 @@ dist/
 .claude/worktrees/
 CLAUDE.local.md
 data/map-tiles/
+config.bat

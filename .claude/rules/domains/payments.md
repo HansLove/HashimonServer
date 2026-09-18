@@ -23,10 +23,26 @@ that coins actually arrived is `payment_partially_paid` / `payment_over_paid` on
 event — nothing is stored on the row.
 
 **Credit purchases (`src/modules/payments/domain/payments.ts`, `credits_plans` + `payments` tables).**
-The only path by which credits enter from outside. Exactly three places move
-`players.credits`: this settle (credit), incubation (`createLot` debit, `closeLotById`
-refund) and companion chat (`companion/domain/chat.ts::speak` debit, which writes no
-`audit()` row). A request carries a **`sku`, never
+The only path by which credits enter from outside. Exactly four places move
+`players.credits`: this settle (credit), the pack bonus
+(`payments/domain/pack-bonus.ts::resolveBonus` credit), incubation (`createLot` debit,
+`closeLotById` refund) and companion chat (`companion/domain/chat.ts::speak` debit, which
+writes no `audit()` row).
+
+**Pack bonus (`payments/domain/pack-bonus.ts`, `pack_bonuses`; docs/BONO_VERIFICABLE_V1.md).**
+The extra on top of a pack's floor. The floor is still the plan's credits, granted by
+`settleAndCredit` as always; the bonus can only ADD, never retains or subtracts the floor.
+`settleAndCredit` only inserts a `pending` row in its own transaction (no network, cannot
+fail by logic: order_id PK + the rules version published in the same transaction). The
+bonus is decided by the hash of a Bitcoin block that did not exist when its height was
+fixed: `commitBonus` sets `target_height = commitTip + 1` once (`WHERE status = 'pending'`),
+`resolveBonus` credits once after 3 confirmations (`WHERE status = 'committed' RETURNING`).
+The network read happens OUTSIDE the transaction. Nothing advances on the webhook: reading
+`GET /payments/bonuses` advances it (no cron, same as incubation) — committing later gives no
+one an edge, it just targets another unknown block. `block-oracle.ts`: two public Esplora
+explorers are REQUIRED and must agree; the node (`BTC_NODE_CONNECTION_URL`) is optional —
+it blocks if it answers a different hash, it never blocks by being down. A +0 % roll is
+still resolved and audited. Never make the bonus a reason the floor waits. A request carries a **`sku`, never
 an amount** — `planFor()` reads the price, and the zod schema in
 `payments/http/routes/payments.ts` is `.strict()` so a smuggled `amount`/`price` is a 400 rather
 than a field quietly ignored. `payments` snapshots `sku`/`credits`/`amount_usd` at

@@ -4,6 +4,7 @@ import { requireSession } from "@/modules/core/http/auth";
 import { AppError, asyncHandler } from "@/modules/core/http/errors";
 import { enrich } from "@/modules/core/http/wide-event";
 import { listActivePlans } from "@/modules/payments/domain/credit-plans";
+import { bonusesFor, presentBonus } from "@/modules/payments/domain/pack-bonus";
 import {
   activePaymentFor,
   cancelPayment,
@@ -27,6 +28,19 @@ paymentsRouter.get(
     const plans = await listActivePlans();
     enrich({ gateway: GATEWAY, plan_count: plans.length });
     res.json({ plans });
+  })
+);
+
+/** Los bonos del jugador. Leer es lo que los hace avanzar: compromete la altura de
+ *  los pendientes y resuelve los que ya tienen confirmaciones (no hay cron). El
+ *  cliente debe llamarlo justo después de ver un cobro liquidado. */
+paymentsRouter.get(
+  "/payments/bonuses",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const rows = await bonusesFor(req.player!.id);
+    enrich({ bonus_count: rows.length, bonus_open: rows.filter((r) => r.status !== "resolved").length });
+    res.json({ bonuses: rows.map(presentBonus) });
   })
 );
 

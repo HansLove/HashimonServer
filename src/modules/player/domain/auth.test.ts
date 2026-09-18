@@ -116,11 +116,14 @@ describe("Luanti guest login and claim (against the local DB)", () => {
     const claimed = await registerOwner({
       username,
       password: "correct-horse-2",
-      dob: "1996-01-06",
+      birthDay: 6,
+      birthMonth: 1,
     });
     assert.equal(claimed.claimed, true);
     assert.equal(canOwn(claimed.player), true);
-    assert.equal(claimed.hashimon !== undefined, true);
+    assert.equal(claimed.hashimon, null);
+    assert.equal(claimed.player.birth_spirit, "bloom");
+    assert.equal(claimed.player.life_number, null);
 
     const row = await query<{ luanti_password: string }>(
       `SELECT luanti_password FROM players WHERE id = $1`,
@@ -130,7 +133,7 @@ describe("Luanti guest login and claim (against the local DB)", () => {
 
     // Now claimed: the same endpoint refuses to claim it a second time.
     await assert.rejects(
-      registerOwner({ username, password: "correct-horse-2", dob: "1996-01-06" }),
+      registerOwner({ username, password: "correct-horse-2", birthDay: 6, birthMonth: 1 }),
       rejectsWithCode("username_taken")
     );
   });
@@ -140,8 +143,35 @@ describe("Luanti guest login and claim (against the local DB)", () => {
     await registerLuantiGuest(username, luantiSrpEntry(username, "correct-horse-3"));
 
     await assert.rejects(
-      registerOwner({ username, password: "totally-wrong-pw", dob: "1996-01-06" }),
+      registerOwner({ username, password: "totally-wrong-pw", birthDay: 6, birthMonth: 1 }),
       rejectsWithCode("username_taken")
+    );
+  });
+
+  it("registers spirit-only then awakens element with year", async () => {
+    const { awakenElement } = await import("@/modules/player/domain/players");
+    const username = uniqueUsername("spirit1");
+    const reg = await registerOwner({
+      username,
+      password: "correct-horse-4",
+      birthDay: 6,
+      birthMonth: 1,
+    });
+    assert.equal(reg.hashimon, null);
+    assert.equal(reg.player.birth_spirit, "bloom");
+    assert.equal(reg.player.life_number, null);
+    assert.equal(reg.player.birth_month, 1);
+    assert.equal(reg.player.birth_day, 6);
+
+    const woke = await awakenElement(reg.player, { year: 1996 });
+    assert.equal(woke.identity.lifeNumber, 5);
+    assert.equal(woke.identity.element, "aire");
+    assert.ok(woke.hashimon.speciesKey.startsWith("g2_bloom_"));
+    assert.equal(woke.player.life_number, 5);
+
+    await assert.rejects(
+      awakenElement(woke.player, { year: 1997 }),
+      rejectsWithCode("element_already_set")
     );
   });
 });

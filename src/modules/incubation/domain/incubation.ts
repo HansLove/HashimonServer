@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { isUniqueViolation, query, withTransaction, type DbClient } from "@/modules/core/db/pool";
 import { AppError } from "@/modules/core/http/errors";
 import { enrich } from "@/modules/core/http/wide-event";
+import { mintFromMark } from "@/modules/cards/domain/stickers";
 import { audit } from "@/modules/core/domain/audit";
 import { config } from "@/modules/core/config";
 import {
@@ -527,13 +528,15 @@ async function applyVerifiedShare(lot: LotRow, payload: CaosSharePayload): Promi
 
     //ON CONFLICT DO NOTHING over BOTH doors: the global hash PK, and this lot's position.
     //An empty result means we have already counted this mark — say so and change nothing.
+    //The template goes in with it: it is the only moment it exists, and without it nobody
+    //outside this server can ever recompute the mark (docs/ESTAMPAS_V1.md §11).
     const inserted = await query(
       `INSERT INTO submitted_shares
-         (hash, hashimon_id, job_id, bits, extranonce2, nonce, origin, caos_lot_id, share_index)
-       VALUES ($1, $2, NULL, $3, NULL, $4, 'caos', $5, $6)
+         (hash, hashimon_id, job_id, bits, extranonce2, nonce, origin, caos_lot_id, share_index, template)
+       VALUES ($1, $2, NULL, $3, NULL, $4, 'caos', $5, $6, $7)
        ON CONFLICT DO NOTHING
        RETURNING hash`,
-      [payload.hash, row.id, verdict.bits, payload.nonce, lot.id, payload.shareIndex],
+      [payload.hash, row.id, verdict.bits, payload.nonce, lot.id, payload.shareIndex, JSON.stringify(verdict.snapshot)],
       client
     );
     if (inserted.rows.length === 0) {
@@ -541,20 +544,22 @@ async function applyVerifiedShare(lot: LotRow, payload: CaosSharePayload): Promi
       return { ok: true as const, duplicate: true as const, lot };
     }
 
-    //Croqueta de energía: cada marca verificada de una incubación deja comida en la
-    //despensa, igual que una cosecha del navegador. Es la segunda fuente de comida del
-    //mundo y la que hace que incubar alimente a tu pueblo además de criar a tu bicho —
-    //los wolkers no distinguen el sabor, sólo cuentan croquetas sin gastar.
-    //Va con el mismo `hash` que la marca (PK global), así que una redelivery no puede
-    //duplicar comida: la puerta de arriba ya devolvió antes de llegar aquí.
-    await query(
-      `INSERT INTO pow_yield
-         (hash, hashimon_id, owner_id, yield_bits, tier, material_key, extranonce2, nonce, place)
-       VALUES ($1, $2, $3, $4, 'consumable', 'incubation', 0, $5, $6)
-       ON CONFLICT DO NOTHING`,
-      [payload.hash, row.id, lot.owner_id, verdict.bits, payload.nonce, `incubation:${lot.id}`],
-      client
-    );
+    //La estampa de la marca (docs/ESTAMPAS_V1.md) y lo que deja en la despensa, que es
+    //lo mismo que dice la estampa (decisión del 18 sept): comida si es comida, materia o
+    //mutágeno si es eso. Instantánea si es común; capullo si cae en una banda que madura
+    //con el bloque siguiente al que se minó, y entonces la despensa espera a ese bloque.
+    //Misma transacción y misma clave (el hash de la marca), así que una reentrega no
+    //puede dar una segunda estampa: la puerta de submitted_shares ya devolvió antes.
+    const sticker = await mintFromMark(client, {
+      hash: payload.hash,
+      ownerId: lot.owner_id,
+      hashimonId: row.id,
+      prevHash: verdict.snapshot.prevhashBE,
+      bits: verdict.bits,
+      nonce: payload.nonce,
+      place: `incubation:${lot.id}`,
+    });
+    enrich({ sticker_tier: sticker.tier, sticker_cocoon: sticker.maturing });
 
     //The record is decided against the COLUMN, never against the value read before the
     //transaction opened. A player browser-mining while their lot runs is two writers on one

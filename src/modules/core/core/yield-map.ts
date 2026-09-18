@@ -24,8 +24,8 @@ export const BLOCK_SIZE = 16;
 
 // Nested leading-zero-bit thresholds over the tier window, tuned for SPATIAL visibility
 // (rich zones rare but present): ~75% consumable, ~19% durable, ~6% capital.
-const T_CAPITAL = 4;
-const T_DURABLE = 2;
+export const T_CAPITAL = 4;
+export const T_DURABLE = 2;
 
 /** Leading zero BITS of a hex string — mirrors the web's `leadingZeroBitsHex`. */
 function leadingZeroBitsHex(hex: string): number {

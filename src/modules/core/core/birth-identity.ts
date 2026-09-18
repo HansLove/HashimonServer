@@ -221,10 +221,41 @@ export function spiritByKey(key: string): Spirit | undefined {
 //Ventana solar -> espíritu. El día 21 abre la ventana del mes en curso; del 1 al
 //20 sigues en la ventana abierta el mes anterior. Fang abre el 21 de enero y
 //Bloom cierra el 20 de enero del año siguiente.
-export function spiritOf(dob: string): SpiritKey {
-  const { month, day } = parseDob(dob);
+export function spiritOfMonthDay(month: number, day: number): SpiritKey {
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    throw new Error("birth-identity: month must be 1..12");
+  }
+  if (!Number.isInteger(day) || day < 1 || day > 31) {
+    throw new Error("birth-identity: day must be 1..31");
+  }
+  // Año bisiesto de referencia: sólo para validar 29-feb; el año NUNCA se
+  // persiste ni entra en el espíritu (la ventana solar es mes+día).
+  const probe = new Date(Date.UTC(2000, month - 1, day));
+  if (probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
+    throw new Error("birth-identity: day is not valid for that month");
+  }
   const i = (((day >= 21 ? month - 1 : month - 2) % 12) + 12) % 12;
   return SPIRITS[i]!.key;
+}
+
+export function spiritOf(dob: string): SpiritKey {
+  const { month, day } = parseDob(dob);
+  return spiritOfMonthDay(month, day);
+}
+
+/** Día+mes reales (calendario), sin año. */
+export function isPlausibleMonthDay(month: number, day: number): boolean {
+  try {
+    spiritOfMonthDay(month, day);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Construye ISO YYYY-MM-DD a partir de mes/día guardados + año del ritual 2. */
+export function composeDob(year: number, month: number, day: number): string {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 // ---------------------------------------------------------------------------

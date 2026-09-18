@@ -38,7 +38,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS players_username_lower_idx
 --
 -- birth_set_at es el anti-reroll: una vez puesta la identidad no se recalcula,
 -- así que no se puede probar fechas hasta sacar el espíritu que se quería.
+--
+-- birth_month / birth_day: día+mes del registro (espíritu). El AÑO no se
+-- guarda aquí: llega después en POST /profile/element para sellar número de
+-- vida + elemento + Genesis. Día/mes no revelan edad.
 ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_spirit    text;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_month     smallint;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_day       smallint;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS life_number     smallint;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS genesis_element text;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_version   smallint;
@@ -400,8 +406,8 @@ ALTER TABLE submitted_shares ADD COLUMN IF NOT EXISTS share_index integer;
 
 -- A CaosEngine share has no mining_jobs row behind it and its extranonce2 is an
 -- 8-byte pool counter, not this table's bigint: both are null for origin='caos'.
--- The full template snapshot of the share that mattered lives on
--- hashimons.best_share_bitcoin, which is what present() re-verifies.
+-- Every mark's full template lives in submitted_shares.template (below); the creature's
+-- best one is also copied to hashimons.best_share_bitcoin, which is what present() re-verifies.
 ALTER TABLE submitted_shares ALTER COLUMN job_id DROP NOT NULL;
 ALTER TABLE submitted_shares ALTER COLUMN extranonce2 DROP NOT NULL;
 
@@ -411,6 +417,25 @@ ALTER TABLE submitted_shares ALTER COLUMN extranonce2 DROP NOT NULL;
 -- different hashes for it.
 CREATE UNIQUE INDEX IF NOT EXISTS submitted_shares_lot_index_idx
   ON submitted_shares (caos_lot_id, share_index) WHERE caos_lot_id IS NOT NULL;
+
+-- The full header template of EVERY bitcoin-mode mark (core/pow.ts::BitcoinShareSnapshot),
+-- not only the creature's best one on hashimons.best_share_bitcoin. It is what lets anyone
+-- outside this server recompute a mark: its hash, its depth, the DNA in its coinbase and
+-- the prevHash it was mined on — which is also the block a maturing sticker waits for
+-- (docs/ESTAMPAS_V1.md §4.5, §11). The template rotates and is gone once verified, so a
+-- mark stored without it can never prove its origin again.
+-- NULL for bound/legacy browser shares, whose preimage re-derives from the DNA and the
+-- nonces already in this row, and for every mark recorded before this column existed.
+ALTER TABLE submitted_shares ADD COLUMN IF NOT EXISTS template jsonb;
+
+-- A CaosEngine mark without its template is exactly the loss the column exists to stop.
+-- NOT VALID: enforced on every new row, while the rows that predate the column stay as they
+-- are — their templates are already unrecoverable, and rejecting the migration over them
+-- would recover nothing.
+DO $$ BEGIN
+  ALTER TABLE submitted_shares ADD CONSTRAINT submitted_shares_caos_template
+    CHECK (origin <> 'caos' OR template IS NOT NULL) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- The credit catalogue. The server fixes the price: a client sends a sku, never an
 -- amount. Changing a price is an UPDATE, not a deploy. No admin CRUD yet — plans are
@@ -948,3 +973,189 @@ ALTER TABLE commissions ADD COLUMN IF NOT EXISTS source_code text REFERENCES aff
 ALTER TABLE commissions DROP CONSTRAINT IF EXISTS commissions_order_id_key;
 CREATE UNIQUE INDEX IF NOT EXISTS commissions_order_code_idx
   ON commissions (order_id, code);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- CARTAS (docs/CARTAS_V1.md) — cada hallazgo de PoW se acuña como una carta.
+--
+-- `hash UNIQUE` NO es integridad referencial: es EL SUMINISTRO. Un hash, una
+-- carta, para siempre. Acuñar cuesta la electricidad que produjo ese hash, así
+-- que nadie — tampoco nosotros — puede regalarse cartas.
+--
+-- Deliberadamente SIN clave foránea a pow_yield: una carta fusionada (V1 §5) no
+-- nace de un hallazgo, su hash es el SHA-256 de los hashes que quemó. La FK haría
+-- imposible la fusión, y el linaje ya deja el origen auditable.
+--
+-- V1 es soulbound: sin transferencia no hay doble gasto que prevenir, así que no
+-- hay sello, ni custody_seq, ni notario. Eso es V2.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS cards (
+  card_id    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  hash       text NOT NULL UNIQUE,
+  owner_id   uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  kind       text NOT NULL CONSTRAINT cards_kind
+             CHECK (kind IN ('food', 'matter', 'mutagen', 'nature', 'fused')),
+  item_key   text NOT NULL,
+  -- Las del hash que la encontró, NO las de la criatura: por eso una carta común
+  -- puede venir sellada con nueve estrellas.
+  stars      integer NOT NULL DEFAULT 0 CHECK (stars >= 0),
+  -- 100/peso, congelado al nacer: retocar el catálogo no revalúa lo ya acuñado,
+  -- igual que payments congela su precio.
+  essence    integer NOT NULL CHECK (essence > 0),
+  -- Sólo en las fusionadas: los hashes que costó. Es el recibo, y es lo único
+  -- (junto al hash) que NO se puede reconstruir si no se guarda desde el día uno.
+  lineage    jsonb,
+  born_at    timestamptz NOT NULL DEFAULT now(),
+  -- Quemada: sale del suministro vivo, nunca de la historia.
+  burned_at  timestamptz
+);
+
+-- La consulta caliente: el inventario y la esencia gastable de un jugador.
+CREATE INDEX IF NOT EXISTS cards_live_owner_idx
+  ON cards (owner_id) WHERE burned_at IS NULL;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- LA ESCALERA DE 99 (docs/CARTAS_V1.md §3) — el nivel es DEL JUGADOR.
+--
+-- `essence` es la BARRA ACTUAL, no un acumulado: al subir de nivel se vacía y
+-- vuelve a empezar. Eso convierte 99 niveles en 98 logros cerrados en vez de una
+-- sola barra que nunca llena.
+--
+-- Va en players y no en hashimons a propósito: cambiar de criatura no reinicia
+-- nada, y la criatura conserva lo único que es suyo y no se compra, sus estrellas.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE players ADD COLUMN IF NOT EXISTS level   integer NOT NULL DEFAULT 1;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS essence integer NOT NULL DEFAULT 0;
+
+-- Las mutaciones ganadas jugando: una cada 10 niveles hasta el 90 (§6.1).
+-- En V1 esto sólo REGISTRA el derecho — el sistema que lo convierte en una forma
+-- nueva (docs/MUTACION_V3.md) todavía es diseño. Se anota desde ya para que
+-- nadie pierda lo que ganó mientras esa parte se construye.
+CREATE TABLE IF NOT EXISTS mutation_grants (
+  owner_id   uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  level      integer NOT NULL,
+  granted_at timestamptz NOT NULL DEFAULT now(),
+  claimed_at timestamptz,
+  -- Un derecho por nivel y jugador: subir, bajar y volver a subir no regala dos.
+  PRIMARY KEY (owner_id, level)
+);
+CREATE INDEX IF NOT EXISTS mutation_grants_unclaimed_idx
+  ON mutation_grants (owner_id) WHERE claimed_at IS NULL;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- VERSIONES DE REGLAS PUBLICADAS — las probabilidades y reglas con que nace cada carta.
+--
+-- `version` es el SHA-256 del CONTENIDO de las reglas (pesos, umbrales, ventanas,
+-- recetas), no un número puesto a mano: cambiar un solo peso produce una versión
+-- nueva aunque nadie se acuerde de subirla. Es la defensa contra el caso Nexon
+-- (Corea, 2024): probabilidades publicadas que se cambiaban en silencio.
+--
+-- `spec` guarda las reglas completas, así que cualquier versión que haya decidido
+-- una carta se puede leer exactamente como era. Se inserta con ON CONFLICT DO
+-- NOTHING: publicar dos veces la misma versión es inocuo, y nunca se borra ni edita.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS rules_versions (
+  version      text PRIMARY KEY,
+  kind         text NOT NULL CONSTRAINT rules_versions_kind CHECK (kind IN ('yield', 'fusion', 'bonus')),
+  spec         jsonb NOT NULL,
+  published_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Con qué reglas nació cada carta. La FK impide sellar una carta con una versión
+-- que no esté publicada. Nullable sólo por las filas anteriores a esta columna:
+-- toda acuñación la escribe (hay test).
+ALTER TABLE cards ADD COLUMN IF NOT EXISTS rules_version text REFERENCES rules_versions(version);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- BONO DEL PAQUETE (docs/BONO_VERIFICABLE_V1.md) — el EXTRA sobre el piso.
+--
+-- El piso lo acredita settleAndCredit como siempre. Esto sólo guarda el extra, que
+-- decide el hash de un bloque de Bitcoin que no existía al fijarse:
+--   pending → committed (target_height fijado UNA vez) → resolved (acreditado UNA vez)
+-- Las dos transiciones son UPDATE … WHERE status = …: la garantía es SQL, no un if.
+--
+-- Todo lo necesario para recalcular el bono queda en la fila: altura, hash, tirada,
+-- tramo y versión de la tabla. Un +0 % también se guarda: un auditor tiene que ver
+-- todas las tiradas, no sólo las premiadas.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS pack_bonuses (
+  order_id       text PRIMARY KEY REFERENCES payments(order_id) ON DELETE CASCADE,
+  player_id      uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  floor_credits  bigint NOT NULL,
+  rules_version  text NOT NULL REFERENCES rules_versions(version),
+  status         text NOT NULL DEFAULT 'pending'
+                 CONSTRAINT pack_bonuses_status CHECK (status IN ('pending', 'committed', 'resolved')),
+  target_height  integer,
+  committed_at   timestamptz,
+  block_hash     text,
+  roll           integer,
+  bonus_pct      integer,
+  bonus_credits  bigint CHECK (bonus_credits IS NULL OR bonus_credits >= 0),
+  resolved_at    timestamptz,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  -- Una fila pendiente no tiene altura; una comprometida o resuelta, sí.
+  CONSTRAINT pack_bonuses_height_iff_committed CHECK ((status = 'pending') = (target_height IS NULL)),
+  -- Sólo una resuelta tiene hash de bloque.
+  CONSTRAINT pack_bonuses_hash_iff_resolved CHECK ((status = 'resolved') = (block_hash IS NOT NULL))
+);
+-- Lo que se avanza al leer: los bonos todavía abiertos de un jugador.
+CREATE INDEX IF NOT EXISTS pack_bonuses_open_idx
+  ON pack_bonuses (player_id, created_at) WHERE status <> 'resolved';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ESTAMPAS QUE MADURAN (docs/ESTAMPAS_V1.md §4.5).
+--
+-- Una marca se mina encima del bloque h-1 (su prevHash). El bloque h todavía no
+-- existe cuando se mina: nadie lo conoce, ni el jugador, ni el pool, ni la casa.
+-- Lo valioso (el mutágeno y la banda de la épica, cards/data/maturation.ts) sale
+-- como CAPULLO y el bloque h decide en qué se convierte:
+--   cocoon → matured (una sola vez: UPDATE … WHERE status = 'cocoon' RETURNING)
+-- La carta se acuña al madurar, en la misma transacción, con el hash de la MARCA
+-- (cards.hash UNIQUE sigue siendo el suministro) y el bloque que la decidió.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- El kind 'maturation' se añadió después de crear la tabla: el CHECK en línea de
+-- CREATE TABLE no llega a una base que ya la tenía, así que se redefine aquí.
+-- DROP + ADD en cada migrate es idempotente y barato (tabla diminuta).
+ALTER TABLE rules_versions DROP CONSTRAINT IF EXISTS rules_versions_kind;
+ALTER TABLE rules_versions ADD CONSTRAINT rules_versions_kind
+  CHECK (kind IN ('yield', 'fusion', 'bonus', 'maturation'));
+
+-- El bloque que decidió una carta madurada. NULL en las instantáneas. Con él y el
+-- hash de la carta cualquiera recalcula el ítem sin preguntarnos nada.
+ALTER TABLE cards ADD COLUMN IF NOT EXISTS matured_with text;
+
+CREATE TABLE IF NOT EXISTS sticker_cocoons (
+  -- La marca. PK: una marca, un capullo, aunque CaosEngine reentregue.
+  mark_hash      text PRIMARY KEY,
+  owner_id       uuid NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  -- Visible desde el primer instante: el capullo dice de qué familia es.
+  tier           text NOT NULL CONSTRAINT sticker_cocoons_tier CHECK (tier IN ('consumable', 'durable', 'capital')),
+  -- El bloque sobre el que se minó la marca (orden de exploradores). La altura de
+  -- madurar sale de aquí: h = altura(prev_hash) + 1. Nada que fijar a mano.
+  prev_hash      text NOT NULL,
+  rules_version  text NOT NULL REFERENCES rules_versions(version),
+  status         text NOT NULL DEFAULT 'cocoon'
+                 CONSTRAINT sticker_cocoons_status CHECK (status IN ('cocoon', 'matured')),
+  target_height  integer,
+  block_hash     text,
+  item_key       text,
+  card_id        uuid REFERENCES cards(card_id) ON DELETE SET NULL,
+  matured_at     timestamptz,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  -- Madurado ⇔ tiene bloque, altura e ítem. Un capullo no tiene ninguno de los tres.
+  CONSTRAINT sticker_cocoons_matured_iff_block CHECK (
+    (status = 'matured') = (block_hash IS NOT NULL AND target_height IS NOT NULL AND item_key IS NOT NULL)
+  )
+);
+-- Lo que se avanza al leer: los capullos de un jugador que siguen cerrados.
+CREATE INDEX IF NOT EXISTS sticker_cocoons_open_idx
+  ON sticker_cocoons (owner_id, created_at) WHERE status = 'cocoon';
+
+-- La despensa sigue a la estampa (decisión 18 sept): un capullo no deja nada en
+-- pow_yield hasta madurar, porque hasta entonces no se sabe QUÉ es. Estos campos son
+-- los que esa fila necesitará entonces — la criatura, la profundidad, el nonce y el
+-- lugar de la marca —, guardados en el instante en que existen.
+ALTER TABLE sticker_cocoons ADD COLUMN IF NOT EXISTS hashimon_id uuid REFERENCES hashimons(id) ON DELETE CASCADE;
+ALTER TABLE sticker_cocoons ADD COLUMN IF NOT EXISTS yield_bits integer;
+ALTER TABLE sticker_cocoons ADD COLUMN IF NOT EXISTS nonce bigint;
+ALTER TABLE sticker_cocoons ADD COLUMN IF NOT EXISTS place text;

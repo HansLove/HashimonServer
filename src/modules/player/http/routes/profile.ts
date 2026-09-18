@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireSession } from "@/modules/core/http/auth";
 import { countForOwner } from "@/modules/hashimon/domain/hashimons";
-import { canOwn, rebirthWithBirthDate } from "@/modules/player/domain/players";
+import { awakenElement, presentPlayer, rebirthWithBirthDate } from "@/modules/player/domain/players";
 import { getPlayerTerritory, presentTerritory } from "@/modules/territory/domain/territory";
 import { asyncHandler } from "@/modules/core/http/errors";
 import { enrich } from "@/modules/core/http/wide-event";
@@ -20,23 +20,10 @@ profileRouter.get(
     const territory = presentTerritory(await getPlayerTerritory(player.id));
     enrich({ hashimon_count: hashimonCount, credits: player.credits, has_town: territory.hasTown });
     res.json({
-      id: player.id,
-      displayName: player.display_name,
-      username: player.username,
-      publicKey: player.public_key,
-      credits: player.credits,
-      custody: player.custody,
-      canOwn: canOwn(player),
+      ...presentPlayer(player),
       hashimonCount,
       memberSince: player.created_at,
       territory,
-      //Birth Identity. birthSpirit/genesisElement son el destino compartido;
-      //lifeNumber es más revelador (con el año conocido deja la fecha en ~3
-      //candidatos, contra ~31 con sólo el espíritu) y por eso vive aquí, en la
-      //vista autenticada del dueño, y no en la tarjeta pública de la criatura.
-      birthSpirit: player.birth_spirit,
-      genesisElement: player.genesis_element,
-      lifeNumber: player.life_number,
       birthVersion: player.birth_version,
     });
   })
@@ -60,6 +47,37 @@ profileRouter.post(
     res.status(201).json({
       hashimon: result.hashimon,
       archived: result.archived,
+      birthSpirit: result.identity.spirit,
+      spiritName: result.identity.spiritName,
+      lifeNumber: result.identity.lifeNumber,
+      element: result.identity.element,
+      undertone: result.identity.undertone,
+      speciesKey: result.identity.speciesKey,
+    });
+  })
+);
+
+const elementSchema = z.union([
+  z.object({ year: z.number().int().min(1900).max(2100) }),
+  z.object({ dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "dob must be YYYY-MM-DD") }),
+]);
+
+//POST /profile/element — ritual 2. Año (o DOB completo) → life number + elemento
+//natural → emite Genesis. Requiere espíritu ya sellado y life_number null.
+profileRouter.post(
+  "/profile/element",
+  requireSession,
+  asyncHandler(async (req, res) => {
+    const input = elementSchema.parse(req.body ?? {});
+    const result = await awakenElement(req.player!, input);
+    enrich({
+      element_awakened: true,
+      life_number: result.identity.lifeNumber,
+      genesis_element: result.identity.element,
+    });
+    res.status(201).json({
+      hashimon: result.hashimon,
+      player: presentPlayer(result.player),
       birthSpirit: result.identity.spirit,
       spiritName: result.identity.spiritName,
       lifeNumber: result.identity.lifeNumber,

@@ -12,6 +12,7 @@ import { AppError } from "@/modules/core/http/errors";
 import { enrich } from "@/modules/core/http/wide-event";
 import { audit } from "@/modules/core/domain/audit";
 import { accrueCommission } from "@/modules/affiliate/domain/affiliates";
+import { createPendingBonus } from "@/modules/payments/domain/pack-bonus";
 import { planFor } from "@/modules/payments/domain/credit-plans";
 
 //The payment book. Every transition here is decided by the server: the client's UI
@@ -312,7 +313,11 @@ async function settleAndCredit(invoiceId: string): Promise<PaymentRow | null> {
     //referido simplemente no inserta nada — así que no añade ningún camino nuevo
     //por el que un pago real se quede sin acreditar.
     await accrueCommission(client, payment.order_id);
-    enrich({ credits_granted: payment.credits, credits_after: credited.rows[0]?.credits });
+    //El EXTRA del paquete queda pendiente en esta misma transacción, sin tocar la
+    //red: el piso ya está acreditado arriba y nada del bono puede retenerlo. Lo
+    //decide un bloque futuro de Bitcoin (pack-bonus.ts), resuelto al leerse.
+    await createPendingBonus(client, payment);
+    enrich({ credits_granted: payment.credits, credits_after: credited.rows[0]?.credits, bonus_pending: true });
     return payment;
   });
 }
